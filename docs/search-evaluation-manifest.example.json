@@ -1,0 +1,14 @@
+{
+  "version": "1.0",
+  "queries": [
+    {
+      "id": "q-data-governance",
+      "query": "数据治理架构和主数据管理流程",
+      "expected_source_keywords": ["data", "governance"],
+      "expected_title_keywords": ["治理", "架构"],
+      "notes": "Fake example. Real customer paths belong in .gstack/search-evaluation-manifest.json."
+    }
+  ],
+  "thresholds": [0.0, 0.2, 0.35, 0.5, 0.65]
+}
+

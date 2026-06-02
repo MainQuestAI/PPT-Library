@@ -1,0 +1,26 @@
+[
+  {
+    "label": "small-architecture",
+    "phase": "baseline",
+    "path": "/absolute/path/to/small-architecture.pptx",
+    "expected_complexity": "small architecture deck"
+  },
+  {
+    "label": "medium-solution",
+    "phase": "baseline",
+    "path": "/absolute/path/to/medium-solution.pptx",
+    "expected_complexity": "medium business solution"
+  },
+  {
+    "label": "image-dense-solution",
+    "phase": "complex",
+    "path": "/absolute/path/to/image-dense-solution.pptx",
+    "expected_complexity": "image dense solution"
+  },
+  {
+    "label": "stress-many-slides",
+    "phase": "complex",
+    "path": "/absolute/path/to/stress-many-slides.pptx",
+    "expected_complexity": "many slides and media objects"
+  }
+]

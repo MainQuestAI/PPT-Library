@@ -1,0 +1,21 @@
+{
+  "schema_version": "1.0",
+  "run_name": "first-draft",
+  "output": {
+    "path": ".gstack/assembled/first-draft/output.pptx",
+    "overwrite": false
+  },
+  "options": {
+    "render_fidelity_baseline": true,
+    "on_complex_slide": "include_with_warning"
+  },
+  "slides": [
+    {
+      "source_file": "examples/source-a.pptx",
+      "page_number": 7,
+      "source_slide_id": 123,
+      "reason": "Business process slide selected for draft assembly.",
+      "risk_policy": "allow_with_warnings"
+    }
+  ]
+}

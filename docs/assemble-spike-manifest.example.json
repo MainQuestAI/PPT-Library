@@ -1,0 +1,13 @@
+{
+  "version": "1.0",
+  "samples": [
+    {
+      "id": "fake-architecture",
+      "path": "/path/to/non-private/example.pptx",
+      "slides": [1, 2],
+      "expected_complexity": ["different-master", "diagram"]
+    }
+  ],
+  "routes": ["xml-inspection", "image-baseline"]
+}
+

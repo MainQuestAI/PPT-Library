@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - "codex/**"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --extra test --extra lint
+
+      - name: Run tests
+        run: uv run --extra test pytest
+
+      - name: Run ruff
+        run: uv run --extra lint ruff check .
+
+      - name: Run mypy
+        run: uv run --extra lint mypy
+
+      - name: CLI schema smoke
+        run: uv run --extra test ppt-lib --home-dir /tmp/ppt-lib-ci schema --output json

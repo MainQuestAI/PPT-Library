@@ -1,0 +1,4 @@
+interface:
+  display_name: "PPT Library"
+  short_description: "操作本地 PPT slide 语义库 CLI"
+  default_prompt: "Use $ppt-library to diagnose my PPT Library CLI setup without indexing private files, then explain whether it is ready for slide search."

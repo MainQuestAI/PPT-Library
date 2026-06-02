@@ -1,0 +1,5 @@
+/example/ppt-library/demo/retail-growth-v1.pptx	1048576
+/example/ppt-library/demo/retail-growth-v2-final.pptx	2097152
+/example/ppt-library/demo/cloud-architecture-overview.pptx	3145728
+/example/ppt-library/demo/customer-analytics-case-study.pptx	4194304
+/example/ppt-library/demo/annual-business-review.pptx	5242880
