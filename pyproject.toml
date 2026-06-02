@@ -39,9 +39,9 @@ lint = [
 ppt-lib = "ppt_lib.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/MainQuestAI/PPT-Library-Open"
-Repository = "https://github.com/MainQuestAI/PPT-Library-Open"
-Issues = "https://github.com/MainQuestAI/PPT-Library-Open/issues"
+Homepage = "https://github.com/MainQuestAI/PPT-Library"
+Repository = "https://github.com/MainQuestAI/PPT-Library"
+Issues = "https://github.com/MainQuestAI/PPT-Library/issues"
 
 [build-system]
 requires = ["hatchling"]

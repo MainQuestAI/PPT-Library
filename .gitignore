@@ -18,6 +18,7 @@ html/
 exports/
 dist/
 *.local.*
+.sources/
 .gstack/
 .claude/
 .worktrees/
