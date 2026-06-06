@@ -51,17 +51,13 @@ ppt-lib setup --quick
 
 ### 3. 创建源清单
 
-先创建一个 JSON 清单文件，指向你的 PPT 文件夹：
+用 `sources manifest` 从用户确认的 PPT 文件夹生成资料源清单：
 
-```json
-{
-  "sources": {
-    "library": [
-      "/path/to/your/ppt-folder"
-    ],
-    "exclude": []
-  }
-}
+```bash
+ppt-lib sources manifest \
+  --library /absolute/path/to/ppt-folder \
+  --manifest-output ./sources-manifest.json \
+  --output json
 ```
 
 然后加载到 PPT Library：
@@ -117,6 +113,35 @@ JSON 输出（适合脚本和 Agent）：
 ```bash
 ppt-lib search "技术架构" --top-k 5 --output json
 ```
+
+### 8. 查看关键页候选
+
+```bash
+ppt-lib enrich-decks --pending --limit 20 --output json
+ppt-lib insights key-pages --output json
+```
+
+需要只看需要视觉复核的页面：
+
+```bash
+ppt-lib insights key-pages --needs-visual --output text
+```
+
+需要交给 Agent 或人工批量审查标签：
+
+```bash
+ppt-lib insights review-pack --output /absolute/path/to/review-pack.jsonl
+```
+
+审查包是只读导出；标签修正继续通过 `import-metadata` 回写。
+
+公开演示可直接使用合成 PPT：
+
+```bash
+uv run --extra demo python scripts/create_demo_decks.py --output /tmp/ppt-lib-demo-decks
+```
+
+这组 PPT 由 `python-pptx` 生成，适合用 LibreOffice 渲染缩略图。没有 LibreOffice 时仍可验证文本索引和关键页识别。
 
 ---
 

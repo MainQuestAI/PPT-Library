@@ -51,6 +51,7 @@ from ppt_lib.evaluation import (
 )
 from ppt_lib.html_renderer import HtmlRenderOptions, render_search_review
 from ppt_lib.indexer import ErrorRecord, extract_pptx_text, index_batch, index_file
+from ppt_lib.insights import export_review_pack, list_key_pages
 from ppt_lib.metadata import MetadataJsonlError, export_metadata_jsonl, import_metadata_jsonl
 from ppt_lib.model_compat import detect_lmstudio_chat_model
 from ppt_lib.pptx_package import PptxPackageError
@@ -64,13 +65,19 @@ from ppt_lib.sources import (
     ALLOWED_SOURCE_ROLES,
     SourceError,
     add_source,
+    classify_source_path,
     collect_pptx_files,
+    index_progress_path_for_home,
+    load_index_progress_state,
+    load_scan_state,
     load_sources_manifest,
     load_sources_profile,
+    risky_source_details,
     risky_source_warnings,
     scan_sources,
     source_profile_hash,
     validate_scan_state_for_index,
+    write_index_progress_state,
     write_scan_state,
     write_sources_profile,
 )
@@ -188,7 +195,21 @@ def _argv_has_command(argv: list[str]) -> bool:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = JsonArgumentParser(prog="ppt-lib")
+    parser = JsonArgumentParser(
+        prog="ppt-lib",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="\n".join(
+            [
+                "常用链路：",
+                "  ppt-lib setup --quick",
+                "  ppt-lib sources manifest --library <ppt-folder> --manifest-output <sources-manifest.json>",
+                "  ppt-lib init --manifest <sources-manifest.json> --non-interactive",
+                "  ppt-lib sources scan --dry-run",
+                "  ppt-lib sources scan --apply",
+                "  ppt-lib index --from-sources",
+            ]
+        ),
+    )
     parser.add_argument("--home-dir")
     parser.add_argument("--version", action="version", version=f"%(prog)s {_package_version()}")
     subparsers = parser.add_subparsers(dest="command", required=True, parser_class=JsonArgumentParser)
@@ -313,6 +334,14 @@ def build_parser() -> argparse.ArgumentParser:
     sources_list_parser.add_argument("--role", choices=ALLOWED_SOURCE_ROLES)
     sources_list_parser.add_argument("--output", choices=["auto", "text", "json"], default="auto")
 
+    sources_manifest_parser = sources_subparsers.add_parser("manifest", help="create a safe sources manifest from user-provided paths")
+    sources_manifest_parser.add_argument("--library", action="append", default=[], help="library folder or pptx path to index")
+    sources_manifest_parser.add_argument("--baseline", action="append", default=[], help="baseline pptx path for workspace profile")
+    sources_manifest_parser.add_argument("--exclude", action="append", default=[], help="folder or file to exclude")
+    sources_manifest_parser.add_argument("--manifest-output", type=Path, help="where to write sources-manifest.json")
+    sources_manifest_parser.add_argument("--summary-output", type=Path, help="where to write onboarding-summary.md")
+    sources_manifest_parser.add_argument("--output", choices=["auto", "text", "json"], default="auto")
+
     sources_scan_parser = sources_subparsers.add_parser("scan", help="preview files/pptx to be considered")
     sources_scan_parser.add_argument("--role", choices=ALLOWED_SOURCE_ROLES)
     sources_scan_group = sources_scan_parser.add_mutually_exclusive_group()
@@ -365,12 +394,28 @@ def build_parser() -> argparse.ArgumentParser:
     assets_prune_group.add_argument("--apply", action="store_true")
     assets_prune_parser.add_argument("--output", choices=["auto", "text", "json"], default="auto")
 
+    insights_parser = subparsers.add_parser("insights", help="inspect key pages and reviewable asset metadata")
+    insights_subparsers = insights_parser.add_subparsers(dest="insights_command", required=True, parser_class=JsonArgumentParser)
+    insights_key_pages_parser = insights_subparsers.add_parser("key-pages", help="show reusable key page candidates")
+    insights_key_pages_parser.add_argument("--status", choices=["candidate", "low_priority", "all"], default="candidate")
+    insights_key_pages_parser.add_argument("--needs-visual", action="store_true")
+    insights_key_pages_parser.add_argument("--limit", type=int, default=20)
+    insights_key_pages_parser.add_argument("--output", choices=["auto", "text", "json"], default="auto")
+    insights_review_parser = insights_subparsers.add_parser("review-pack", help="export reviewable slide metadata")
+    insights_review_parser.add_argument("--output", type=Path, required=True, help="where to write review pack")
+    insights_review_parser.add_argument("--output-format", choices=["jsonl", "json"], default="jsonl")
+    insights_review_parser.add_argument("--limit", type=int)
+
     record_deal_parser = subparsers.add_parser("record-deal")
     record_deal_parser.add_argument("--name", required=True)
     record_deal_parser.add_argument("--client-type")
     record_deal_parser.add_argument("--stage")
     record_deal_parser.add_argument("--outcome", choices=["won", "lost", "pending", "unknown"], default="unknown")
     record_deal_parser.add_argument("--notes")
+    record_deal_parser.add_argument("--description")
+    record_deal_parser.add_argument("--industry")
+    record_deal_parser.add_argument("--scenario")
+    record_deal_parser.add_argument("--tags")
 
     record_usage_parser = subparsers.add_parser("record-usage")
     record_usage_parser.add_argument("--deal-id", type=int, required=True)
@@ -559,6 +604,8 @@ def _dispatch(args: argparse.Namespace, settings) -> tuple[dict[str, object], li
                 return qa_payload, [ErrorRecord("QA_SAMPLE_FAILED", "Local sample QA failed.", "sample_qa")]
             return qa_payload, []
     if args.command == "sources":
+        if args.sources_command == "manifest":
+            return _create_sources_manifest(settings, args)
         if args.sources_command == "add":
             try:
                 role = args.role
@@ -601,6 +648,7 @@ def _dispatch(args: argparse.Namespace, settings) -> tuple[dict[str, object], li
                 profile = load_sources_profile(settings.home_dir) if settings.home_dir else load_sources_profile(Path.home())
                 roles: list[str] | None = [args.role] if args.role else None
                 risk_warnings = risky_source_warnings(profile, roles=roles)
+                risk_details = risky_source_details(profile, roles=roles)
                 if args.apply and risk_warnings and not args.force_risky_sources:
                     scan_result = _blocked_source_scan_result(profile, roles=roles)
                     scan_result["command"] = "sources"
@@ -608,6 +656,7 @@ def _dispatch(args: argparse.Namespace, settings) -> tuple[dict[str, object], li
                     scan_result["dry_run"] = False
                     scan_result["source_profile_hash"] = source_profile_hash(profile)
                     scan_result["risk_warnings"] = risk_warnings
+                    scan_result["risk_details"] = [_dataclass_to_json(item) for item in risk_details]
                     return {"operation": "scan", "scan": scan_result, "sources": profile.to_dict()}, [
                         ErrorRecord(
                             "SOURCE_RISK_CONFIRMATION_REQUIRED",
@@ -621,6 +670,7 @@ def _dispatch(args: argparse.Namespace, settings) -> tuple[dict[str, object], li
                 scan_result["dry_run"] = not args.apply
                 scan_result["source_profile_hash"] = source_profile_hash(profile)
                 scan_result["risk_warnings"] = risk_warnings
+                scan_result["risk_details"] = [_dataclass_to_json(item) for item in risk_details]
                 if args.apply:
                     assert settings.home_dir is not None
                     scan_state_path = write_scan_state(
@@ -658,11 +708,46 @@ def _dispatch(args: argparse.Namespace, settings) -> tuple[dict[str, object], li
                     )
                 ]
             pptx_files = collect_pptx_files(profile, roles=["library"])
-            index_results = [index_file(path, settings, full=args.full) for path in pptx_files]
+            assert settings.home_dir is not None
+            progress_path = index_progress_path_for_home(settings.home_dir)
+            started_at = datetime.now(UTC).isoformat()
+            index_results = []
+            failed_count = 0
+
+            def write_progress(status: str, processed: int, *, current_file: Path | None = None) -> None:
+                write_index_progress_state(
+                    settings.home_dir,
+                    {
+                        "status": status,
+                        "source": "index --from-sources",
+                        "total_pptx": len(pptx_files),
+                        "processed_pptx": processed,
+                        "failed_pptx": failed_count,
+                        "current_file": str(_normalize_path(current_file)) if current_file else None,
+                        "started_at": started_at,
+                        "updated_at": datetime.now(UTC).isoformat(),
+                    },
+                )
+
+            write_progress("running", 0)
+            try:
+                for index, path in enumerate(pptx_files, start=1):
+                    write_progress("running", index - 1, current_file=path)
+                    result = index_file(path, settings, full=args.full)
+                    index_results.append(result)
+                    if result.status == "failed" or result.errors:
+                        failed_count += 1
+                    write_progress("running", index, current_file=path)
+                write_progress("completed", len(pptx_files))
+            except Exception:
+                processed = len(index_results)
+                write_progress("failed", processed)
+                raise
             payload = {
                 "results": [_dataclass_to_json(result) for result in index_results],
                 "source_count": len(profile.library),
                 "pptx_count": len(pptx_files),
+                "index_progress_path": str(_normalize_path(progress_path)),
             }
             errors = _collect_errors(index_results)
             if args.with_ai_summary:
@@ -761,8 +846,8 @@ def _dispatch(args: argparse.Namespace, settings) -> tuple[dict[str, object], li
                 ]
             return family_payload, []
         if args.versions_command == "recompute":
-            result = recompute_deck_versions(conn, dry_run=not args.apply)
-            return {"result": _dataclass_to_json(result)}, []
+            version_recompute_result = recompute_deck_versions(conn, dry_run=not args.apply)
+            return {"result": _dataclass_to_json(version_recompute_result)}, []
         raise ValueError(f"Unknown versions subcommand: {args.versions_command}")
     if args.command == "assets":
         if args.assets_command == "status":
@@ -771,6 +856,28 @@ def _dispatch(args: argparse.Namespace, settings) -> tuple[dict[str, object], li
             payload = _assets_prune(settings, dry_run=not args.apply)
             return payload, []
         raise ValueError(f"Unknown assets subcommand: {args.assets_command}")
+    if args.command == "insights":
+        conn = connect(settings.db_path)
+        init_db(conn)
+        if args.insights_command == "key-pages":
+            return list_key_pages(
+                conn,
+                status=args.status,
+                needs_visual=args.needs_visual,
+                limit=args.limit,
+            ), []
+        if args.insights_command == "review-pack":
+            try:
+                review_pack_result = export_review_pack(
+                    conn,
+                    _normalize_path(args.output),
+                    output_format=args.output_format,
+                    limit=args.limit,
+                )
+            except OSError as exc:
+                return {"result": None}, [ErrorRecord("INSIGHTS_REVIEW_PACK_ERROR", str(exc), "insights")]
+            return {"result": review_pack_result}, []
+        raise ValueError(f"Unknown insights subcommand: {args.insights_command}")
     if args.command == "status":
         conn = connect(settings.db_path)
         init_db(conn)
@@ -794,6 +901,7 @@ def _dispatch(args: argparse.Namespace, settings) -> tuple[dict[str, object], li
             },
             "failed_jobs": [_dataclass_to_json(job) for job in list_failed_jobs(conn)],
             "orphan_presentations": [_dataclass_to_json(item) for item in list_orphan_presentations(conn)],
+            "sources_health": _sources_health(settings),
         }, []
     if args.command == "discover":
         try:
@@ -830,7 +938,10 @@ def _dispatch(args: argparse.Namespace, settings) -> tuple[dict[str, object], li
             ]
         return model_report, []
     if args.command == "schema":
-        return {"schema": _schema(settings.schema_version)}, []
+        return {
+            "schema": _schema(settings.schema_version),
+            "quick_start": _quick_start_commands(),
+        }, []
     if args.command == "eval-search":
         try:
             evaluation_manifest = load_evaluation_manifest(_normalize_path(Path(args.manifest)))
@@ -866,7 +977,13 @@ def _dispatch(args: argparse.Namespace, settings) -> tuple[dict[str, object], li
                 client_type=args.client_type,
                 deal_stage=args.stage,
                 outcome=args.outcome,
-                notes=args.notes,
+                notes=_build_deal_notes(
+                    notes=args.notes,
+                    description=args.description,
+                    industry=args.industry,
+                    scenario=args.scenario,
+                    tags=args.tags,
+                ),
             )
         except DatabaseError as exc:
             return {"deal": None}, [ErrorRecord("RECORD_DEAL_ERROR", str(exc), "db")]
@@ -1110,6 +1227,7 @@ def _collect_errors(results: list[Any]) -> list[ErrorRecord]:
 
 
 def _search_result_to_json(result) -> dict[str, object]:
+    metadata = result.metadata if isinstance(result.metadata, dict) else {}
     return {
         "slide_id": result.slide_id,
         "score": result.score,
@@ -1120,7 +1238,15 @@ def _search_result_to_json(result) -> dict[str, object]:
         "screenshot_path": str(_normalize_path(result.screenshot_path)) if result.screenshot_path else None,
         "source": result.source,
         "confidence": result.confidence,
-        "narrative_role": result.metadata.get("narrative_role") if isinstance(result.metadata, dict) else None,
+        "narrative_role": metadata.get("narrative_role"),
+        "page_role": metadata.get("page_role"),
+        "importance_score": metadata.get("importance_score"),
+        "importance_reason": metadata.get("importance_reason"),
+        "needs_visual": metadata.get("needs_visual"),
+        "reuse_count": metadata.get("reuse_count"),
+        "won_count": metadata.get("won_count"),
+        "lost_count": metadata.get("lost_count"),
+        "win_rate": metadata.get("win_rate"),
         "metadata": result.metadata,
         "cluster_id": result.cluster_id,
         "cluster_label": result.cluster_label,
@@ -1234,6 +1360,139 @@ def _manifest_slide_count(manifest: dict[str, object]) -> int:
     return len(slides) if isinstance(slides, list) else 0
 
 
+def _create_sources_manifest(settings, args: argparse.Namespace) -> tuple[dict[str, object], list[ErrorRecord]]:
+    assert settings.home_dir is not None
+    manifest_path = (
+        _normalize_path(args.manifest_output)
+        if args.manifest_output
+        else settings.home_dir / "sources" / "sources-manifest.json"
+    )
+    summary_path = _normalize_path(args.summary_output) if args.summary_output else settings.home_dir / "sources" / "onboarding-summary.md"
+    inputs: dict[str, list[str]] = {
+        "baseline": list(args.baseline or []),
+        "library": list(args.library or []),
+        "exclude": list(args.exclude or []),
+    }
+    accepted: dict[str, list[str]] = {"baseline": [], "library": [], "exclude": []}
+    rejected: list[dict[str, str]] = []
+    classifications: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    for role, values in inputs.items():
+        for raw_value in values:
+            if not isinstance(raw_value, str) or not raw_value.strip():
+                rejected.append({"role": role, "path": str(raw_value), "category": "invalid", "reason": "empty path"})
+                continue
+            normalized = _normalize_path(Path(raw_value))
+            key = (role, str(normalized))
+            if key in seen:
+                continue
+            seen.add(key)
+            classification = classify_source_path(normalized, role=role)
+            classifications.append(classification.to_dict())
+            if role != "exclude" and classification.category in {"blocked", "noisy"}:
+                rejected.append(classification.to_dict())
+                continue
+            if not normalized.exists():
+                rejected.append({"role": role, "path": str(normalized), "category": "missing", "reason": "path does not exist"})
+                continue
+            accepted[role].append(str(normalized))
+
+    profile = {
+        "sources": accepted,
+        "metadata": {
+            "created_by": "ppt-lib sources manifest",
+            "created_at": datetime.now(UTC).isoformat(),
+            "purpose": "agent guided library onboarding",
+        },
+    }
+    counts = {role: len(items) for role, items in accepted.items()}
+    risk_warnings = [
+        f"{item['role']}:{item['path']} {item['reason']}"
+        for item in rejected
+        if item.get("category") in {"blocked", "noisy"}
+    ]
+    next_commands = [
+        f"ppt-lib init --manifest {manifest_path} --non-interactive --output json",
+        "ppt-lib sources scan --dry-run --output json",
+        "ppt-lib sources scan --apply --output json",
+        "ppt-lib index --from-sources",
+        "ppt-lib status --output json",
+    ]
+    payload: dict[str, object] = {
+        "command": "sources",
+        "operation": "manifest",
+        "manifest_path": str(_normalize_path(manifest_path)),
+        "summary_path": str(_normalize_path(summary_path)),
+        "sources": accepted,
+        "counts": counts,
+        "rejected_sources": rejected,
+        "risk_warnings": sorted(dict.fromkeys(risk_warnings)),
+        "classifications": classifications,
+        "next_commands": next_commands,
+    }
+    if not any(inputs.values()):
+        return payload, [
+            ErrorRecord(
+                "SOURCE_MANIFEST_INPUT_REQUIRED",
+                "Provide at least one --library, --baseline, or --exclude path.",
+                "sources",
+            )
+        ]
+    if counts["baseline"] + counts["library"] == 0:
+        return payload, [
+            ErrorRecord(
+                "SOURCE_MANIFEST_NO_INDEXABLE_SOURCES",
+                "No valid baseline or library paths were accepted.",
+                "sources",
+            )
+        ]
+
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(json.dumps(profile, indent=2, ensure_ascii=False), encoding="utf-8")
+    summary_path.write_text(_sources_manifest_summary(payload), encoding="utf-8")
+    return payload, []
+
+
+def _sources_manifest_summary(payload: dict[str, object]) -> str:
+    counts = payload.get("counts", {})
+    sources = payload.get("sources", {})
+    rejected = payload.get("rejected_sources", [])
+    risk_warnings = payload.get("risk_warnings", [])
+    lines = [
+        "# PPT Library Onboarding Summary",
+        "",
+        f"- Manifest: {payload.get('manifest_path', '-')}",
+        f"- baseline: {counts.get('baseline', 0) if isinstance(counts, dict) else 0}",
+        f"- library: {counts.get('library', 0) if isinstance(counts, dict) else 0}",
+        f"- exclude: {counts.get('exclude', 0) if isinstance(counts, dict) else 0}",
+    ]
+    if isinstance(sources, dict):
+        for role in ("baseline", "library", "exclude"):
+            items = sources.get(role, [])
+            if isinstance(items, list) and items:
+                lines.append("")
+                lines.append(f"## {role}")
+                lines.extend(f"- {item}" for item in items)
+    if isinstance(risk_warnings, list) and risk_warnings:
+        lines.append("")
+        lines.append("## Risk Warnings")
+        lines.extend(f"- {item}" for item in risk_warnings)
+    if isinstance(rejected, list) and rejected:
+        lines.append("")
+        lines.append("## Rejected Sources")
+        for item in rejected:
+            if isinstance(item, dict):
+                lines.append(f"- {item.get('role', '-')}: {item.get('path', '-')} ({item.get('reason', '-')})")
+    lines.append("")
+    lines.append("## Next Commands")
+    next_commands = payload.get("next_commands", [])
+    if isinstance(next_commands, list):
+        lines.extend(f"- `{item}`" for item in next_commands)
+    return "\n".join(lines) + "\n"
+
+
 def _dataclass_to_json(value: Any) -> Any:
     if is_dataclass(value):
         return {key: _json_default(item) for key, item in asdict(cast(Any, value)).items()}
@@ -1266,6 +1525,8 @@ def _human_output(command: str, payload: dict[str, object], errors: list[ErrorRe
         text = _human_assets(payload)
     elif command == "versions":
         text = _human_versions(payload)
+    elif command == "insights":
+        text = _human_insights(payload)
     if errors and text:
         return f"{text}\n\n{_human_errors(command, errors)}"
     if errors:
@@ -1482,6 +1743,7 @@ def _human_doctor(payload: dict[str, object]) -> str:
 def _human_status(payload: dict[str, object]) -> str:
     stats = payload.get("stats")
     health = payload.get("health")
+    sources_health = payload.get("sources_health")
     failed_jobs = payload.get("failed_jobs", [])
     orphan_presentations = payload.get("orphan_presentations", [])
     lines = [
@@ -1500,6 +1762,27 @@ def _human_status(payload: dict[str, object]) -> str:
         lines.append(f"有 {len(failed_jobs)} 个失败任务，建议运行 doctor 或 prune。")
     if isinstance(orphan_presentations, list) and orphan_presentations:
         lines.append(f"有 {len(orphan_presentations)} 个孤立 PPT 记录。")
+    if isinstance(sources_health, dict):
+        counts = sources_health.get("profile_counts", {})
+        lines.append("")
+        lines.append("资料源状态")
+        if isinstance(counts, dict):
+            lines.append(f"- baseline: {counts.get('baseline', 0)}")
+            lines.append(f"- library: {counts.get('library', 0)}")
+            lines.append(f"- exclude: {counts.get('exclude', 0)}")
+        lines.append(f"- scan-state: {'存在' if sources_health.get('scan_state_present') else '缺失'}")
+        lines.append(f"- stale: {sources_health.get('scan_state_stale', False)}")
+        index_progress = sources_health.get("index_progress")
+        if isinstance(index_progress, dict):
+            lines.append("")
+            lines.append("建库进度")
+            lines.append(f"- status: {index_progress.get('status', '-')}")
+            lines.append(f"- total_pptx: {index_progress.get('total_pptx', 0)}")
+            lines.append(f"- processed_pptx: {index_progress.get('processed_pptx', 0)}")
+            lines.append(f"- failed_pptx: {index_progress.get('failed_pptx', 0)}")
+            current_file = index_progress.get("current_file")
+            if current_file:
+                lines.append(f"- current_file: {current_file}")
     return "\n".join(lines)
 
 
@@ -1530,7 +1813,29 @@ def _human_sources(payload: dict[str, object]) -> str:
     operation = payload.get("operation", "-")
     lines = ["PPT Library Sources"]
     lines.append(f"- 操作: {operation}")
-    if operation == "add":
+    if operation == "manifest":
+        lines.append(f"- Manifest: {payload.get('manifest_path', '-')}")
+        lines.append(f"- Summary: {payload.get('summary_path', '-')}")
+        counts = payload.get("counts", {})
+        if isinstance(counts, dict):
+            lines.append(f"- baseline: {counts.get('baseline', 0)}")
+            lines.append(f"- library: {counts.get('library', 0)}")
+            lines.append(f"- exclude: {counts.get('exclude', 0)}")
+        rejected = payload.get("rejected_sources", [])
+        if isinstance(rejected, list) and rejected:
+            lines.append("- 未写入来源:")
+            for item in rejected:
+                if isinstance(item, dict):
+                    lines.append(f"  - {item.get('role', '-')}: {item.get('path', '-')} ({item.get('reason', '-')})")
+        risk_warnings = payload.get("risk_warnings", [])
+        if isinstance(risk_warnings, list) and risk_warnings:
+            lines.append("- 风险提示:")
+            lines.extend(f"  - {item}" for item in risk_warnings)
+        next_commands = payload.get("next_commands", [])
+        if isinstance(next_commands, list) and next_commands:
+            lines.append("- 下一步:")
+            lines.extend(f"  - {item}" for item in next_commands)
+    elif operation == "add":
         lines.append(f"- 角色: {payload.get('role', '-')}")
         lines.append(f"- 路径: {payload.get('source', '-')}")
         lines.append(f"- Profile: {payload.get('profile_path', '-')}")
@@ -1546,8 +1851,14 @@ def _human_sources(payload: dict[str, object]) -> str:
             lines.append(f"- 扫描源数: {len(scanned_roots) if isinstance(scanned_roots, list) else 0}")
             lines.append(f"- 文件数: {scan.get('file_count', 0)}")
             lines.append(f"- PPTX: {scan.get('pptx_count', 0)}")
-            lines.append(f"- 预计页数: {scan.get('estimated_pages', 0)}")
+            lines.append(f"- 粗略规模: {scan.get('estimated_file_count', scan.get('file_count', 0))} 个文件")
             lines.append(f"- dry-run: {scan.get('dry_run', True)}")
+            risk_details = scan.get("risk_details", [])
+            if isinstance(risk_details, list) and risk_details:
+                lines.append("- 风险来源:")
+                for item in risk_details:
+                    if isinstance(item, dict):
+                        lines.append(f"  - {item.get('role', '-')}: {item.get('path', '-')} ({item.get('reason', '-')})")
             excluded_directories = scan.get("excluded_directories", [])
             if isinstance(excluded_directories, list) and excluded_directories:
                 lines.append("- 已排除目录:")
@@ -1678,6 +1989,38 @@ def _human_versions(payload: dict[str, object]) -> str:
     return "\n".join(lines)
 
 
+def _human_insights(payload: dict[str, object]) -> str:
+    if "items" in payload:
+        summary = payload.get("summary", {})
+        items = payload.get("items", [])
+        total = summary.get("total", 0) if isinstance(summary, dict) else 0
+        lines = ["PPT Library Key Pages", f"- 候选页: {total}"]
+        if isinstance(summary, dict) and summary.get("message"):
+            lines.append(f"- 提示: {summary.get('message')}")
+        if isinstance(items, list):
+            for item in items[:20]:
+                if not isinstance(item, dict):
+                    continue
+                presentation = item.get("presentation", {})
+                business = item.get("business", {})
+                filename = presentation.get("filename", "-") if isinstance(presentation, dict) else "-"
+                reuse = business.get("reuse_count", 0) if isinstance(business, dict) else 0
+                won = business.get("won_count", 0) if isinstance(business, dict) else 0
+                lines.append(
+                    f"- slide_id={item.get('slide_id')} P{item.get('page_number')} "
+                    f"{item.get('page_role') or '-'} score={item.get('importance_score') or 0} "
+                    f"reuse={reuse} won={won} {filename}"
+                )
+        return "\n".join(lines)
+    result = payload.get("result", {})
+    lines = ["PPT Library Review Pack"]
+    if isinstance(result, dict):
+        lines.append(f"- exported: {result.get('exported', 0)}")
+        lines.append(f"- output: {result.get('output_path', '-')}")
+        lines.append(f"- format: {result.get('output_format', '-')}")
+    return "\n".join(lines)
+
+
 def _human_assets(payload: dict[str, object]) -> str:
     result = payload.get("result", payload)
     lines = ["PPT Library Assets"]
@@ -1730,6 +2073,7 @@ def _schema(schema_version: str) -> dict[str, object]:
             "enrich-decks",
             "versions",
             "assets",
+            "insights",
             "setup",
             "doctor",
             "config",
@@ -1795,16 +2139,24 @@ def _help_payload(version: str, schema_version: str) -> dict[str, object]:
     return {
         "version": version,
         "summary": "PPT Library local CLI is installed. Choose a command below.",
-        "quick_start": [
-            "ppt-lib setup --quick",
-            "ppt-lib init --manifest <sources-manifest.json> --non-interactive",
-            "ppt-lib sources scan --dry-run",
-            "ppt-lib sources scan --apply",
-            "ppt-lib index --from-sources",
-            "ppt-lib search \"<query>\" --top-k 5",
-        ],
+        "quick_start": _quick_start_commands(),
         "commands": _schema(schema_version)["commands"],
     }
+
+
+def _quick_start_commands() -> list[str]:
+    return [
+        "ppt-lib setup --quick",
+        "ppt-lib sources manifest --library <ppt-folder> --manifest-output <sources-manifest.json>",
+        "ppt-lib init --manifest <sources-manifest.json> --non-interactive",
+        "ppt-lib sources scan --dry-run",
+        "ppt-lib sources scan --apply",
+        "ppt-lib index --from-sources",
+        "ppt-lib enrich-decks --pending --limit 20",
+        "ppt-lib insights key-pages --output json",
+        "ppt-lib status --output json",
+        "ppt-lib search \"<query>\" --top-k 5",
+    ]
 
 
 def _plain_help_text(version: str) -> str:
@@ -1815,6 +2167,7 @@ def _plain_help_text(version: str) -> str:
             "常用命令：",
             "  ppt-lib setup --quick",
             "  ppt-lib setup --mode lmstudio --non-interactive",
+            "  ppt-lib sources manifest --library <ppt-folder> --manifest-output <sources-manifest.json>",
             "  ppt-lib init --manifest <sources-manifest.json> --non-interactive",
             "  ppt-lib sources scan --dry-run",
             "  ppt-lib sources scan --apply",
@@ -1864,6 +2217,8 @@ def _blocked_source_scan_result(profile, *, roles: list[str] | None) -> dict[str
         "file_count": 0,
         "pptx_count": 0,
         "estimated_pages": 0,
+        "estimated_file_count": 0,
+        "scale_estimate": {"kind": "file_count", "value": 0, "label": "rough file count"},
         "excluded_directories": [],
     }
 
@@ -1881,6 +2236,35 @@ def _active_workspace_profile_ready(settings) -> bool:
     ).fetchone()
     profile_payload = profile_payload_from_row(row[0] if row else None)
     return profile_payload.get("status") == "complete"
+
+
+def _sources_health(settings) -> dict[str, object]:
+    if settings.home_dir is None:
+        return {"status": "unavailable", "reason": "home_dir is missing"}
+    home_dir = settings.home_dir
+    try:
+        profile = load_sources_profile(home_dir)
+        scan_state = load_scan_state(home_dir)
+        index_progress = load_index_progress_state(home_dir)
+    except SourceError as exc:
+        return {"status": "error", "error": {"code": exc.code, "message": str(exc)}}
+
+    profile_hash = source_profile_hash(profile)
+    scan_state_present = scan_state is not None
+    scan_state_hash = scan_state.get("source_profile_hash") if isinstance(scan_state, dict) else None
+    scan_state_stale = bool(scan_state_present and scan_state_hash != profile_hash)
+    return {
+        "status": "ok",
+        "profile_path": str(_normalize_path(home_dir / "sources" / "profile")),
+        "profile_counts": {role: len(getattr(profile, role)) for role in ["baseline", "library", "exclude"]},
+        "profile_hash": profile_hash,
+        "scan_state_present": scan_state_present,
+        "scan_state_stale": scan_state_stale,
+        "scan_state_path": str(_normalize_path(home_dir / "sources" / "scan-state.json")),
+        "scan_state": scan_state,
+        "index_progress_path": str(_normalize_path(index_progress_path_for_home(home_dir))),
+        "index_progress": index_progress,
+    }
 
 
 def _build_workspace_profile(settings) -> tuple[dict[str, object], list[ErrorRecord]]:
@@ -2048,6 +2432,58 @@ def _safe_asset_path(settings, asset_uri: str) -> Path | None:
     return path
 
 
+def _build_deal_notes(
+    *,
+    notes: str | None,
+    description: str | None,
+    industry: str | None,
+    scenario: str | None,
+    tags: str | None,
+) -> str | None:
+    if not any([description, industry, scenario, tags]):
+        return notes
+    payload = {
+        "notes": notes,
+        "description": description,
+        "industry": industry,
+        "scenario": scenario,
+        "tags": _parse_tags(tags),
+    }
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+
+def _parse_tags(tags: str | None) -> list[str]:
+    if not tags:
+        return []
+    return [item.strip() for item in tags.split(",") if item.strip()]
+
+
+def _parse_deal_description(notes: str | None) -> dict[str, object]:
+    defaults: dict[str, object] = {
+        "notes": notes,
+        "description": None,
+        "industry": None,
+        "scenario": None,
+        "tags": [],
+    }
+    if not notes:
+        return defaults
+    try:
+        parsed = json.loads(notes)
+    except json.JSONDecodeError:
+        return defaults
+    if not isinstance(parsed, dict):
+        return defaults
+    tags = parsed.get("tags", [])
+    return {
+        "notes": parsed.get("notes"),
+        "description": parsed.get("description"),
+        "industry": parsed.get("industry"),
+        "scenario": parsed.get("scenario"),
+        "tags": tags if isinstance(tags, list) else [],
+    }
+
+
 def _table_count(conn, table_name: str) -> int:
     row = conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?", (table_name,)).fetchone()
     if not row or int(row[0]) == 0:
@@ -2079,6 +2515,7 @@ def _fetch_deal(conn, deal_id: int) -> dict[str, object]:
         "created_at": row[5],
         "closed_at": row[6],
         "notes": row[7],
+        "deal_description": _parse_deal_description(row[7]),
     }
 
 

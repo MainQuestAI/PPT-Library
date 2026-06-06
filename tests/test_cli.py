@@ -14,8 +14,74 @@ from ppt_lib.searcher import SearchError, SearchResult
 from ppt_lib.watch import WatchRuntimeError
 
 
+class StaticProvider:
+    def __init__(self, vector: np.ndarray) -> None:
+        self.vector = vector.astype(np.float32)
+        self.model = "static"
+        self.dimensions = int(self.vector.shape[0])
+
+    def encode(self, text: str) -> np.ndarray:
+        return self.vector
+
+    def encode_batch(self, texts):
+        return [self.encode(text) for text in texts]
+
+
 def read_stdout(capsys):
     return json.loads(capsys.readouterr().out)
+
+
+def seed_insight_slide(tmp_path: Path, *, needs_visual: bool = True) -> tuple[int, int]:
+    from ppt_lib.db import PresentationRecord, SlideRecord, connect, init_db, upsert_presentation, upsert_slide
+
+    conn = connect(tmp_path / "index.db")
+    init_db(conn)
+    presentation_id = upsert_presentation(
+        conn,
+        PresentationRecord(
+            path=tmp_path / "demo" / "retail-growth.pptx",
+            filename="retail-growth.pptx",
+            project_name="Demo Retail",
+            slide_count=1,
+            content_hash="hash",
+            file_size=100,
+            file_mtime=1.0,
+        ),
+    )
+    slide_id = upsert_slide(
+        conn,
+        SlideRecord(
+            presentation_id=presentation_id,
+            slide_index=0,
+            title="Retail Growth Architecture",
+            text_content="retail architecture value case",
+            embedding=np.r_[1.0, np.zeros(1535)].astype(np.float32),
+            screenshot_hash=None,
+            source="text_extraction",
+            extraction_warnings=[],
+            metadata_json={},
+        ),
+    )
+    conn.execute(
+        """
+        UPDATE slides
+        SET industry = ?, scenario = ?, narrative_role = ?, quality_rating = ?,
+            reuse_count = ?, won_count = ?, lost_count = ?, win_rate = ?
+        WHERE id = ?
+        """,
+        ("retail", "proposal", "architecture", 5, 3, 2, 1, 0.6667, slide_id),
+    )
+    conn.execute(
+        """
+        INSERT INTO slide_importance (
+          slide_id, importance_score, importance_reason, page_role, needs_visual, status, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (slide_id, 0.85, "architecture,business_reuse_signal", "architecture", int(needs_visual), "candidate", "2026-06-06T00:00:00Z"),
+    )
+    conn.commit()
+    return presentation_id, slide_id
 
 
 def test_build_envelope_has_meta_and_errors() -> None:
@@ -154,6 +220,29 @@ def test_cli_search_html_returns_html_path(monkeypatch, capsys, tmp_path: Path) 
 
     assert exit_code == 0
     assert payload["html_path"].endswith("review.html")
+
+
+def test_cli_search_json_includes_key_page_and_business_fields(monkeypatch, capsys, tmp_path: Path) -> None:
+    seed_insight_slide(tmp_path)
+    monkeypatch.setattr("ppt_lib.searcher.build_embedding_provider", lambda settings: StaticProvider(np.r_[1.0, np.zeros(1535)]))
+
+    exit_code = main([
+        "--home-dir", str(tmp_path),
+        "search", "retail architecture",
+        "--threshold", "0",
+        "--output", "json",
+    ])
+    payload = read_stdout(capsys)
+
+    assert exit_code == 0
+    result = payload["results"][0]
+    assert result["page_role"] == "architecture"
+    assert result["importance_score"] == 0.85
+    assert result["importance_reason"] == "architecture,business_reuse_signal"
+    assert result["needs_visual"] is True
+    assert result["reuse_count"] == 3
+    assert result["won_count"] == 2
+    assert result["win_rate"] == 0.6667
 
 
 def test_cli_search_forwards_assembled_view_flags(monkeypatch, capsys, tmp_path: Path) -> None:
@@ -475,9 +564,11 @@ def test_cli_schema_outputs_json_schema(capsys, tmp_path: Path) -> None:
     assert "record-deal" in payload["schema"]["commands"]
     assert "record-usage" in payload["schema"]["commands"]
     assert "recompute-stats" in payload["schema"]["commands"]
+    assert "insights" in payload["schema"]["commands"]
     assert "select-slides" in payload["schema"]["commands"]
     assert "build-manifest" in payload["schema"]["commands"]
     assert "models" in payload["schema"]["commands"]
+    assert "ppt-lib sources manifest --library <ppt-folder> --manifest-output <sources-manifest.json>" in payload["quick_start"]
 
 
 def test_cli_schema_text_output_lists_commands(capsys, tmp_path: Path) -> None:
@@ -515,6 +606,29 @@ def test_cli_record_deal_creates_deal(capsys, tmp_path: Path) -> None:
         (payload["deal"]["id"],),
     ).fetchone()
     assert row == ("Retail Renewal", "retail", "proposal", "won", "pilot")
+
+
+def test_cli_record_deal_accepts_structured_description(capsys, tmp_path: Path) -> None:
+    exit_code = main([
+        "--home-dir", str(tmp_path),
+        "record-deal",
+        "--name", "Synthetic Retail Win",
+        "--outcome", "won",
+        "--notes", "public demo fixture",
+        "--description", "A synthetic opportunity used for open-source demo.",
+        "--industry", "retail",
+        "--scenario", "proposal",
+        "--tags", "demo,architecture",
+    ])
+    payload = read_stdout(capsys)
+
+    assert exit_code == 0
+    description = payload["deal"]["deal_description"]
+    assert description["notes"] == "public demo fixture"
+    assert description["description"] == "A synthetic opportunity used for open-source demo."
+    assert description["industry"] == "retail"
+    assert description["scenario"] == "proposal"
+    assert description["tags"] == ["demo", "architecture"]
 
 
 def test_cli_record_usage_records_usage_and_recomputes(capsys, tmp_path: Path) -> None:
@@ -803,6 +917,75 @@ def test_cli_export_metadata_writes_sanitized_jsonl(capsys, tmp_path: Path) -> N
     }]
     assert "sensitive-client" not in output.read_text(encoding="utf-8")
     assert "Private title" not in output.read_text(encoding="utf-8")
+
+
+def test_cli_insights_key_pages_outputs_asset_fields(capsys, tmp_path: Path) -> None:
+    _, slide_id = seed_insight_slide(tmp_path)
+
+    exit_code = main(["--home-dir", str(tmp_path), "insights", "key-pages", "--output", "json"])
+    payload = read_stdout(capsys)
+
+    assert exit_code == 0
+    assert payload["_meta"]["command"] == "insights"
+    assert payload["summary"]["total"] == 1
+    item = payload["items"][0]
+    assert item["slide_id"] == slide_id
+    assert item["page_role"] == "architecture"
+    assert item["importance_score"] == 0.85
+    assert item["needs_visual"] is True
+    assert item["metadata"]["narrative_role"] == "architecture"
+    assert item["business"]["reuse_count"] == 3
+    assert item["business"]["won_count"] == 2
+
+
+def test_cli_insights_key_pages_filters_needs_visual(capsys, tmp_path: Path) -> None:
+    seed_insight_slide(tmp_path, needs_visual=False)
+
+    exit_code = main([
+        "--home-dir", str(tmp_path),
+        "insights", "key-pages",
+        "--needs-visual",
+        "--output", "json",
+    ])
+    payload = read_stdout(capsys)
+
+    assert exit_code == 0
+    assert payload["summary"]["total"] == 0
+    assert "enrich-decks" in payload["summary"]["message"]
+
+
+def test_cli_insights_key_pages_empty_before_deck_enrich(capsys, tmp_path: Path) -> None:
+    from ppt_lib.db import connect, init_db
+
+    conn = connect(tmp_path / "index.db")
+    init_db(conn)
+
+    exit_code = main(["--home-dir", str(tmp_path), "insights", "key-pages", "--output", "json"])
+    payload = read_stdout(capsys)
+
+    assert exit_code == 0
+    assert payload["items"] == []
+    assert "enrich-decks" in payload["summary"]["message"]
+
+
+def test_cli_insights_review_pack_exports_reviewable_jsonl(capsys, tmp_path: Path) -> None:
+    _, slide_id = seed_insight_slide(tmp_path)
+    output = tmp_path / "review-pack.jsonl"
+
+    exit_code = main([
+        "--home-dir", str(tmp_path),
+        "insights", "review-pack",
+        "--output", str(output),
+    ])
+    payload = read_stdout(capsys)
+
+    assert exit_code == 0
+    assert payload["result"]["exported"] == 1
+    rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+    assert rows[0]["slide_id"] == slide_id
+    assert rows[0]["metadata"]["industry"] == "retail"
+    assert rows[0]["business"]["win_rate"] == 0.6667
+    assert rows[0]["presentation"]["filename"] == "retail-growth.pptx"
 
 
 def test_cli_setup_lmstudio_writes_non_sensitive_config(monkeypatch, capsys, tmp_path: Path) -> None:
@@ -1123,10 +1306,19 @@ def test_cli_no_args_outputs_human_help(capsys) -> None:
     assert exit_code == 0
     assert output.startswith("PPT Library CLI ")
     assert "常用命令：" in output
+    assert "ppt-lib sources manifest --library <ppt-folder> --manifest-output <sources-manifest.json>" in output
     assert "ppt-lib doctor --output json" in output
     assert "ppt-lib index --from-sources" in output
     assert "--with-ai-summary" not in output
     assert "_errors" not in output
+
+
+def test_cli_help_outputs_guided_sources_manifest_entry(capsys) -> None:
+    exit_code = main(["--help"])
+    output = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert "ppt-lib sources manifest --library <ppt-folder> --manifest-output <sources-manifest.json>" in output
 
 
 def test_cli_no_command_with_home_dir_outputs_human_help(capsys, tmp_path: Path) -> None:

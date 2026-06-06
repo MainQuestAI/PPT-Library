@@ -26,12 +26,15 @@ CLI 不实现业务算法，只编排模块。
 | `ppt-lib search "<query>" --include-assembled --dedupe-lineage` | 搜索包含派生页并按 lineage 去重 |
 | `ppt-lib search "<query>" --ranking business` | 使用赢率和复用次数做业务加权排序 |
 | `ppt-lib search "<query>" --narrative-role <role>` | 按叙事角色过滤搜索结果 |
+| `ppt-lib search "<query>" --output json` | JSON 结果包含关键页和战绩解释字段 |
 | `ppt-lib status` | 库统计，交互终端默认文本 |
 | `ppt-lib discover <dir>` | 项目扫描和 symlink view |
 | `ppt-lib watch <dir>` | 文件监听 |
 | `ppt-lib vision --test` | 诊断 |
 | `ppt-lib schema --output json` | 输出 schema |
-| `ppt-lib record-deal --name <name> --outcome <outcome>` | 录入 deal 基本信息 |
+| `ppt-lib insights key-pages [--status candidate|low_priority|all] [--needs-visual]` | 输出关键页候选清单 |
+| `ppt-lib insights review-pack --output <path> [--output-format jsonl|json]` | 导出可审查 slide metadata 包 |
+| `ppt-lib record-deal --name <name> --outcome <outcome>` | 录入 deal 基本信息，支持 `--description`、`--industry`、`--scenario`、`--tags` |
 | `ppt-lib record-usage --deal-id <id> --slide-id <id> --deck-presentation-id <id>` | 记录 slide 使用事实并刷新统计 |
 | `ppt-lib recompute-stats [--slide-id <id>]` | 重算 slides 表缓存字段 |
 | `ppt-lib import-metadata --jsonl <path>` | 导入脱敏叙事 metadata JSONL |
@@ -91,18 +94,24 @@ def build_envelope(command: str, payload: dict[str, object], errors: list[ErrorR
 | `test_cli_search_html_returns_html_path` | HTML |
 | `test_cli_search_forwards_assembled_view_flags` | assembled_output 搜索视图参数 |
 | `test_cli_search_forwards_business_ranking_and_narrative_role` | business ranking 和叙事过滤参数 |
+| `test_cli_search_json_includes_key_page_and_business_fields` | search JSON 输出关键页和战绩字段 |
 | `test_cli_status_outputs_stats` | status |
 | `test_cli_discover_outputs_items` | discover |
 | `test_cli_watch_validates_root` | watch 参数 |
 | `test_cli_vision_test_outputs_report` | diagnostics |
 | `test_cli_schema_outputs_json_schema` | schema |
 | `test_cli_record_deal_creates_deal` | deal 录入 |
+| `test_cli_record_deal_accepts_structured_description` | deal 结构化描述兼容 notes |
 | `test_cli_record_usage_records_usage_and_recomputes` | usage 记录和统计刷新 |
 | `test_cli_record_usage_error_is_structured` | usage 错误映射 |
 | `test_cli_recompute_stats_updates_cache` | 手动重算缓存 |
 | `test_cli_import_metadata_updates_slide_columns` | metadata 导入 |
 | `test_cli_import_metadata_error_is_structured` | metadata 导入错误 |
 | `test_cli_export_metadata_writes_sanitized_jsonl` | 脱敏 metadata 导出 |
+| `test_cli_insights_key_pages_outputs_asset_fields` | 关键页候选 JSON 输出 |
+| `test_cli_insights_key_pages_filters_needs_visual` | 视觉复核过滤 |
+| `test_cli_insights_key_pages_empty_before_deck_enrich` | 未生成 slide_importance 时给清晰空结果 |
+| `test_cli_insights_review_pack_exports_reviewable_jsonl` | 审查包 JSONL 导出 |
 | `test_cli_select_slides_outputs_report` | 自动选页报告 |
 | `test_cli_build_manifest_writes_manifest` | 选页结果转换 manifest |
 | `test_cli_purge_assembled_output_apply` | 派生页清理 |

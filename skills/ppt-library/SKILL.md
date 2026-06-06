@@ -11,8 +11,10 @@
 | 生成 HTML 审查页 | `ppt-lib search "<query>" --html` |
 | 索引单个文件 | `ppt-lib index <path>` |
 | 批量索引 | `ppt-lib index --batch <dir> [--full]` |
-| 资料库建库 | `ppt-lib init --manifest <sources-manifest.json>` → `sources scan --dry-run` → `sources scan --apply` → `index --from-sources` |
+| 资料库建库 | `ppt-lib sources manifest` → `init --manifest` → `sources scan --dry-run` → `sources scan --apply` → `index --from-sources` |
 | AI 摘要补充 | `ppt-lib profile build` → `ppt-lib enrich` |
+| Deck 理解与关键页 | `ppt-lib enrich-decks --pending` → `ppt-lib insights key-pages` |
+| 标签审查包导出 | `ppt-lib insights review-pack --output <jsonl>` |
 | 视觉模型链路检查 | `ppt-lib models test` |
 | 模型能力检测 | `ppt-lib models test` |
 | 配置查看／修改 | `ppt-lib config path\|get\|set` |
@@ -22,7 +24,7 @@
 | 孤立记录清理 | `ppt-lib prune --dry-run` → `--apply` |
 | 聚合诊断 | `ppt-lib doctor --output json` |
 | 生成用户画像 | `ppt-lib profile build --output json` |
-| 战绩数据录入 | `ppt-lib record-deal` / `record-usage` |
+| 战绩数据录入 | `ppt-lib record-deal --description ...` / `record-usage` |
 | 叙事批量标注 | `ppt-lib annotate [--batch]` |
 | 自动选页 | `ppt-lib select-slides --roles <roles> --brief "..."` |
 | 自动组装 | `ppt-lib compose --brief "..." [--auto]` |
@@ -35,20 +37,22 @@
 4. 返回 payload 中的 `_errors` 用于判断是否有阻塞性错误。有错误时输出到 stderr，正常输出到 stdout。
 5. `_meta.schema_version` 字段目前为 `1.0`。后续升级时可能增加字段，但不会破坏向后兼容。
 6. 画像就绪：使用 AI summary 前必须先执行 `profile build`，并确认 `ready=true`。
-7. 建库前必须通过 `sources scan --dry-run` 确认扫描范围，避免误扫 Home、Downloads、缓存目录。
+7. 建库前先用 `sources manifest` 生成资料源清单，再通过 `sources scan --dry-run` 确认扫描范围，避免误扫 Home、Downloads、回收站、缓存目录和依赖包目录。
+8. 需要判断“哪些页值得先看”时，先执行 `enrich-decks --pending --limit 20`，再执行 `insights key-pages --output json`。
+9. 需要批量审查标签时，使用 `insights review-pack --output <jsonl>` 导出只读包；标签回写继续使用 `import-metadata`。
 
 ### 建库前安全确认
 
-1. 资料范围通过 init 写入 manifest，角色分为 `baseline`（用户画像基准）、`library`（入库资料）、`exclude`（排除路径）。
+1. 资料范围通过 `sources manifest` 生成 manifest，再由 `init --manifest` 写入生效 profile。角色分为 `baseline`（用户画像基准）、`library`（入库资料）、`exclude`（排除路径）。
 2. 基准 PPT：至少准备 1~3 个样例 PPT（`sources scan --dry-run` 时可先确认它们是否能正常识别）。
 3. 资料库目录：在 manifest 中写明 `baseline`、`library`（与 excludes）。
-4. 排除目录：将 `~/Library/Caches`、`~/Downloads`、微信文件夹缓存、WPS/WXWork 缓存路径加入 `exclude`。
+4. 高风险目录：Home、Downloads、回收站、缓存、微信、WPS、`site-packages`、`node_modules`、outputs、exports、artifacts 默认不得进入 `library`。
 5. 确认扫描：dry-run 后必须执行 `sources scan --apply`，让 CLI 写入 scan-state。
 6. 画像就绪：使用 AI summary 前必须先执行 `profile build`，并确认 `ready=true`。
 
 详细说明见仓库文档 `docs/guides/library-build-guideline.md`。CLI 会强制检查 scan-state、高风险路径和 profile readiness；Skill 只负责按流程引导。
 
-未 dry-run 且未显式确认时，**不得**扫描 Home、Downloads、微信缓存、WPS 缓存路径。遇到高风险来源时，先向用户说明风险，再让用户决定是否追加 `--force-risky-sources`。
+未 dry-run 且未显式确认时，**不得**扫描 Home、Downloads、回收站、微信缓存、WPS 缓存、依赖包目录和临时产物目录。遇到高风险来源时，先向用户说明风险，再让用户决定是否追加 `--force-risky-sources`。
 
 推荐命令链（确认后执行）：
 
@@ -56,13 +60,28 @@
 
 ```bash
 ppt-lib setup --quick --non-interactive
+ppt-lib sources manifest --library /absolute/path/to/ppt-folder --manifest-output /absolute/path/to/sources-manifest.json --output json
 ppt-lib init --manifest /path/to/sources-manifest.json --non-interactive
 ppt-lib sources scan --role baseline --dry-run
 ppt-lib sources scan --role library --dry-run
 ppt-lib sources scan --apply
 ppt-lib index --from-sources
+ppt-lib status --output json
 ppt-lib search "你的查询"
 ```
+
+### 资产经营闭环（公开演示）
+
+```bash
+ppt-lib enrich-decks --pending --limit 20 --output json
+ppt-lib insights key-pages --output json
+ppt-lib insights review-pack --output /absolute/path/to/review-pack.jsonl
+ppt-lib record-deal --name "Synthetic Retail Win" --outcome won --description "Synthetic demo opportunity" --industry retail --scenario proposal --tags demo,key-page
+ppt-lib record-usage --deal-id <deal-id> --slide-id <slide-id> --deck-presentation-id <presentation-id>
+ppt-lib search "业务架构 价值" --ranking business --threshold 0.0 --output json
+```
+
+`insights key-pages` 返回关键页候选、页面角色、重要性分、视觉复核标记和战绩统计。`business ranking` 只有在真实 usage 和 won/lost 数据积累后才会体现业务权重。
 
 ### 完整建库（可选，含 AI 摘要）
 

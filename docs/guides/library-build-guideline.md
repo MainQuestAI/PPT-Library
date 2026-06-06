@@ -4,6 +4,8 @@
 
 本指南定义 PPT Library 的建库安全流程。Skill 负责引导，CLI 负责硬门禁；Agent 或脚本必须按这里的顺序执行。
 
+如果用户让 Agent 从安装 CLI 开始，并希望安装后直接进入建库引导，Agent 应先阅读 [Agent Install and Guided Library Build Design](agent-install-and-build-guideline.md)。该文档定义安装阶段的用户问答、`sources-manifest.json` 生成、dry-run 汇报和建库监控流程。
+
 ## 目标
 
 - 建库前明确资料范围、基准 PPT 和排除目录。
@@ -16,10 +18,12 @@
 
 ```bash
 ppt-lib setup --quick --non-interactive
+ppt-lib sources manifest --library /absolute/path/to/ppt-folder --manifest-output /path/to/sources-manifest.json
 ppt-lib init --manifest /path/to/sources-manifest.json --non-interactive
 ppt-lib sources scan --dry-run
 ppt-lib sources scan --apply
 ppt-lib index --from-sources
+ppt-lib status --output json
 ppt-lib search "内容中心 技术架构" --top-k 8
 ```
 
@@ -78,8 +82,11 @@ CLI 会在下列场景直接停止：
 
 - 用户 Home 根目录。
 - `~/Downloads` 及其子目录。
+- `~/.Trash` 及其子目录。
 - `~/Library/Caches` 及其子目录。
 - 微信、企业微信、WPS、WXWork 等缓存目录。
+- Python、Node.js 等依赖包目录，例如 `site-packages` 和 `node_modules`。
+- `output`、`outputs`、`exports`、`artifacts` 等临时产物目录。
 
 Agent 不应主动建议扫描这些目录。用户确实要这么做时，先展示 dry-run 结果和风险说明，再追加 `--force-risky-sources`。
 
@@ -120,8 +127,9 @@ ppt-lib assets prune --dry-run
 Agent 汇报建库进展时至少包含：
 
 - manifest 是否已写入。
-- dry-run 命中的 PPTX 数量、估算页数和排除目录。
+- dry-run 命中的 PPTX 数量、粗略规模和排除目录。
 - `sources scan --apply` 是否写入 scan-state。
 - profile 是否 ready。
 - index 是否执行、失败数量、是否走 AI summary。
+- `status --output json` 中的 `sources_health.index_progress`。
 - 是否出现高风险来源或缓存目录。

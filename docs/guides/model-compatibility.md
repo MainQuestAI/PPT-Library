@@ -23,7 +23,7 @@ PPT Library 使用 embedding 模型将每页 PPT 的内容转换为向量，实�
 - **缺点：** 需要 API key、有成本
 
 ```bash
-export PPT_LIB_OPENAI_API_KEY="sk-..."
+export PPT_LIB_OPENAI_API_KEY="<your-openai-key>"
 ppt-lib setup --quick
 ```
 

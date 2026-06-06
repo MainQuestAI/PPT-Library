@@ -1,6 +1,6 @@
 # PPT Library
 
-PPT Library is a local-first CLI for building a searchable, reusable presentation asset library from PPTX files. It indexes slides, groups deck versions, supports search and review, and gives AI agents a stable tool boundary for working with local PowerPoint assets.
+PPT Library is a local-first CLI for indexing, searching, reviewing, and reusing PPTX slide assets with AI agents. It groups deck versions, exports review packs, tracks reuse signals, and keeps private presentation data on the user's machine.
 
 It is useful when:
 
@@ -27,7 +27,9 @@ It is useful when:
 | `ppt_lib/` | CLI and core runtime |
 | `skills/ppt-library/` | Agent Skill for safely operating `ppt-lib` |
 | `docs/quick-start-guide.md` | Full setup, indexing, and search guide |
+| `docs/guides/asset-intelligence-demo.md` | Synthetic demo for key pages, review packs, usage tracking, and business ranking |
 | `docs/guides/library-build-guideline.md` | Safe local library build process |
+| `docs/guides/open-source-release-checklist.md` | Release hygiene checklist for public snapshots |
 | `docs/guides/model-compatibility.md` | LM Studio, Ollama, and OpenAI-compatible model guidance |
 | `docs/specs/` | Module specs for CLI, database, search, screenshots, and vision |
 
@@ -73,23 +75,30 @@ Use this path for your first manual library build and search.
 # 1. Initialize configuration.
 uv run ppt-lib setup --quick
 
-# 2. Load a source manifest.
+# 2. Create a source manifest.
+uv run ppt-lib sources manifest --library /absolute/path/to/ppt-folder --manifest-output ./ppt-sources.json
+
+# 3. Load the source manifest.
 uv run ppt-lib init --manifest ./ppt-sources.json --non-interactive
 
-# 3. Preview the scan scope.
+# 4. Preview the scan scope.
 uv run ppt-lib sources scan --dry-run
 
-# 4. Confirm the scan scope.
+# 5. Confirm the scan scope.
 uv run ppt-lib sources scan --apply
 
-# 5. Build the index.
+# 6. Build the index.
 uv run ppt-lib index --from-sources
 
-# 6. Search and generate an HTML review page.
+# 7. Search and generate an HTML review page.
 uv run ppt-lib search "technical architecture" --html
+
+# 8. Fill deck insights and inspect key pages.
+uv run ppt-lib enrich-decks --pending --limit 20
+uv run ppt-lib insights key-pages --output json
 ```
 
-Search HTML is written to `~/.ppt-library/html/search.html` by default.
+Search HTML is written to `~/.ppt-library/html/search-review-*.html`.
 
 Minimal source manifest:
 
@@ -118,6 +127,8 @@ uv run ppt-lib --home-dir /tmp/ppt-lib-smoke status --output json
 uv run ppt-lib --home-dir /tmp/ppt-lib-smoke vision --test
 
 # 2. Build only after the user confirms the source scope.
+uv run ppt-lib sources manifest --library /absolute/path/to/ppt-folder --manifest-output ~/.ppt-library/sources/sources-manifest.json --output json
+uv run ppt-lib init --manifest ~/.ppt-library/sources/sources-manifest.json --non-interactive --output json
 uv run ppt-lib sources scan --dry-run --output json
 uv run ppt-lib sources scan --apply --output json
 uv run ppt-lib index --from-sources
@@ -125,7 +136,12 @@ uv run ppt-lib index --from-sources
 # 3. Search with JSON and inspect _errors.
 uv run ppt-lib search "customer success case study" --top-k 8 --output json
 
-# 4. Compose with dry-run first, then execute a confirmed plan.
+# 4. Inspect reusable key pages and export a review pack.
+uv run ppt-lib enrich-decks --pending --limit 20 --output json
+uv run ppt-lib insights key-pages --output json
+uv run ppt-lib insights review-pack --output /tmp/ppt-lib-review-pack.jsonl
+
+# 5. Compose with dry-run first, then execute a confirmed plan.
 uv run ppt-lib compose --brief "Create a customer success proposal deck" --dry-run
 uv run ppt-lib compose --confirm /path/to/narrative-plan.json
 ```
@@ -182,6 +198,10 @@ See [Agent Adapters](skills/ppt-library/references/agent-adapters.md) for host-s
 | Inspect a deck family | `ppt-lib versions inspect <family-id>` |
 | Recompute version families | `ppt-lib versions recompute --dry-run` |
 | Fill deck insights | `ppt-lib enrich-decks --pending --limit 20` |
+| Inspect key page candidates | `ppt-lib insights key-pages --output json` |
+| Export review pack | `ppt-lib insights review-pack --output /path/to/review-pack.jsonl` |
+| Record deal context | `ppt-lib record-deal --name "..." --outcome won --description "..." --industry retail --scenario proposal --tags demo,key-page` |
+| Search with business ranking | `ppt-lib search "query" --ranking business --output json` |
 | Preview compose | `ppt-lib compose --brief "..." --dry-run` |
 | Assemble from confirmed plan | `ppt-lib compose --confirm /path/to/narrative-plan.json` |
 
@@ -232,6 +252,8 @@ The public repository does not contain real PPT files, customer materials, sampl
 
 - [Quick Start Guide](docs/quick-start-guide.md)
 - [Library Build Guideline](docs/guides/library-build-guideline.md)
+- [Asset Intelligence Demo](docs/guides/asset-intelligence-demo.md)
+- [Open Source Release Checklist](docs/guides/open-source-release-checklist.md)
 - [Model Compatibility](docs/guides/model-compatibility.md)
 - [Agent Adapters](skills/ppt-library/references/agent-adapters.md)
 - [Specs](docs/specs/README.md)
@@ -242,11 +264,12 @@ The public repository does not contain real PPT files, customer materials, sampl
 uv run --extra test pytest
 uv run --extra lint ruff check .
 uv run --extra lint mypy
+uv run python scripts/release_check.py --output json
 uv build
 ```
 
-Current baseline: 506 automated tests.
+Current baseline: 518 automated tests.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+Apache License 2.0. See [LICENSE](LICENSE).

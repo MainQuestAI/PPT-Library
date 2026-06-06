@@ -1,10 +1,10 @@
 [project]
 name = "ppt-library"
-version = "1.3.0"
-description = "Local agent-facing PPT slide library CLI"
+version = "1.4.0"
+description = "Local-first CLI for indexing, searching, reviewing, and reusing PPTX slide assets with AI agents."
 readme = "README.md"
 requires-python = ">=3.12"
-license = "MIT"
+license = "Apache-2.0"
 authors = [
   { name = "MainQuest AI" },
 ]
@@ -12,7 +12,7 @@ classifiers = [
   "Development Status :: 4 - Beta",
   "Environment :: Console",
   "Intended Audience :: Developers",
-  "License :: OSI Approved :: MIT License",
+  "License :: OSI Approved :: Apache Software License",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.12",
   "Topic :: Office/Business",
@@ -33,6 +33,9 @@ test = [
 lint = [
   "mypy>=1.10",
   "ruff>=0.8",
+]
+demo = [
+  "python-pptx>=1.0",
 ]
 
 [project.scripts]

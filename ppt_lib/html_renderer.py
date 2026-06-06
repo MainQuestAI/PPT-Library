@@ -68,6 +68,7 @@ def _render_result(result: SearchResult, options: HtmlRenderOptions, index: int)
     title = _display_title(result)
     metadata_html = _render_metadata(result)
     duplicate_html = _render_duplicate_info(result)
+    asset_html = _render_asset_summary(result)
     return f"""
     <article class="result" data-index="{index}">
       <div class="media">{image}</div>
@@ -79,7 +80,7 @@ def _render_result(result: SearchResult, options: HtmlRenderOptions, index: int)
           <dt>Source</dt><dd>{html.escape(result.source_file.name)}（评分 {result.score:.3f}）</dd>
           <dt>Page</dt><dd>{result.page_number}</dd>
           <dt>Source Type</dt><dd>{html.escape(result.source)}</dd>
-          <dt>Score</dt><dd>{result.score:.3f}</dd>{breakdown_html}
+          <dt>Score</dt><dd>{result.score:.3f}</dd>{breakdown_html}{asset_html}
           {duplicate_html}
           <dt>Metadata</dt><dd>{metadata_html}</dd>
         </dl>
@@ -95,8 +96,11 @@ def _render_narrative_tags(result: SearchResult) -> str:
     role = meta.get("narrative_role")
     industry = meta.get("industry")
     scenario = meta.get("scenario")
+    page_role = meta.get("page_role")
     if role:
         tags.append(f'<span class="tag tag-role">{html.escape(str(role))}</span>')
+    if page_role:
+        tags.append(f'<span class="tag tag-key">{html.escape(str(page_role))}</span>')
     if industry:
         tags.append(f'<span class="tag tag-industry">{html.escape(str(industry))}</span>')
     if scenario:
@@ -104,6 +108,17 @@ def _render_narrative_tags(result: SearchResult) -> str:
     if not tags:
         return ""
     return f'<div class="tags">{"".join(tags)}</div>'
+
+
+def _render_asset_summary(result: SearchResult) -> str:
+    meta = result.metadata or {}
+    parts: list[str] = []
+    for key in ("page_role", "importance_score", "importance_reason", "needs_visual", "reuse_count", "won_count", "lost_count", "win_rate"):
+        value = meta.get(key)
+        if value is None:
+            continue
+        parts.append(f"<dt>{html.escape(str(key))}</dt><dd>{html.escape(str(value))}</dd>")
+    return "".join(parts)
 
 
 def _render_score_breakdown(result: SearchResult) -> str:
@@ -136,7 +151,18 @@ def _render_metadata(result: SearchResult) -> str:
     metadata = _safe_metadata(result.metadata)
     if not metadata:
         return "<span>metadata: none</span>"
-    keys = ("industry", "scenario", "narrative_role", "confidence", "win_rate", "origin_type")
+    keys = (
+        "industry",
+        "scenario",
+        "narrative_role",
+        "page_role",
+        "importance_score",
+        "reuse_count",
+        "won_count",
+        "win_rate",
+        "confidence",
+        "origin_type",
+    )
     rows = []
     for key in keys:
         if key not in metadata:
@@ -182,23 +208,33 @@ def _document(title: str, state: str, body: str) -> str:
   <title>{escaped_title}</title>
   <style>
     body {{ font-family: -apple-system, BlinkMacSystemFont, sans-serif; margin: 24px; color: #1f2933; }}
+    main {{ max-width: 100%; }}
     .result {{
       display: grid;
       grid-template-columns: minmax(220px, 42%) 1fr;
       gap: 20px;
       border-bottom: 1px solid #d8dee4;
       padding: 20px 0;
+      min-width: 0;
     }}
+    .media, .content {{ min-width: 0; }}
     img {{ max-width: 100%; border: 1px solid #d8dee4; }}
     .placeholder {{ display: grid; place-items: center; min-height: 180px; background: #f3f4f6; color: #6b7280; }}
+    h2, p, dt, dd, summary, .tag {{ overflow-wrap: anywhere; }}
     dt {{ font-weight: 700; margin-top: 8px; }}
     dd {{ margin: 0; overflow-wrap: anywhere; }}
     .notice {{ padding: 10px 12px; background: #fff7ed; border: 1px solid #fed7aa; }}
     .tags {{ display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }}
     .tag {{ display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 12px; font-weight: 500; }}
     .tag-role {{ background: #dbeafe; color: #1e40af; }}
+    .tag-key {{ background: #fde68a; color: #854d0e; }}
     .tag-industry {{ background: #dcfce7; color: #166534; }}
     .tag-scenario {{ background: #fef3c7; color: #92400e; }}
+    @media (max-width: 700px) {{
+      body {{ margin: 16px; }}
+      .result {{ grid-template-columns: 1fr; gap: 12px; }}
+      .placeholder {{ min-height: 140px; }}
+    }}
   </style>
 </head>
 <body>

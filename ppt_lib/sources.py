@@ -13,6 +13,7 @@ SourceRole = str
 ALLOWED_SOURCE_ROLES = ("baseline", "library", "exclude")
 PROFILE_FILE_NAME = "sources/profile"
 SCAN_STATE_FILE_NAME = "sources/scan-state.json"
+INDEX_PROGRESS_FILE_NAME = "sources/index-progress.json"
 HIGH_RISK_CACHE_TOKENS = (
     "wechat",
     "weixin",
@@ -22,6 +23,26 @@ HIGH_RISK_CACHE_TOKENS = (
     "wps",
     "kingsoft",
 )
+NOISY_SOURCE_DIR_NAMES = {
+    "output",
+    "outputs",
+    "export",
+    "exports",
+    "artifact",
+    "artifacts",
+    "assembled",
+    "screenshots",
+}
+BLOCKED_SOURCE_DIR_NAMES = {
+    ".trash",
+    "trash",
+    "cache",
+    "caches",
+    "cached",
+    "site-packages",
+    "node_modules",
+    "__pycache__",
+}
 
 
 class SourceError(RuntimeError):
@@ -44,12 +65,32 @@ class SourceProfile:
         return {"baseline": self.baseline, "library": self.library, "exclude": self.exclude}
 
 
+@dataclass(frozen=True)
+class SourcePathClassification:
+    role: SourceRole
+    path: str
+    category: str
+    reason: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "role": self.role,
+            "path": self.path,
+            "category": self.category,
+            "reason": self.reason,
+        }
+
+
 def profile_path_for_home(home_dir: Path) -> Path:
     return home_dir.expanduser() / PROFILE_FILE_NAME
 
 
 def scan_state_path_for_home(home_dir: Path) -> Path:
     return home_dir.expanduser() / SCAN_STATE_FILE_NAME
+
+
+def index_progress_path_for_home(home_dir: Path) -> Path:
+    return home_dir.expanduser() / INDEX_PROGRESS_FILE_NAME
 
 
 def normalize_role(role: str) -> SourceRole:
@@ -116,27 +157,67 @@ def risky_source_warnings(
     roles: list[SourceRole] | None = None,
     user_home: Path | None = None,
 ) -> list[str]:
+    return [
+        f"{item.role}:{item.path} {item.reason}"
+        for item in risky_source_details(profile, roles=roles, user_home=user_home)
+    ]
+
+
+def risky_source_details(
+    profile: SourceProfile,
+    *,
+    roles: list[SourceRole] | None = None,
+    user_home: Path | None = None,
+) -> list[SourcePathClassification]:
     selected_roles: list[str] = roles or ["baseline", "library"]
     for role in selected_roles:
         normalize_role(role)
-    home = (user_home or Path.home()).expanduser().resolve(strict=False)
-    downloads = home / "Downloads"
-    library_caches = home / "Library" / "Caches"
-    warnings: list[str] = []
+    details: list[SourcePathClassification] = []
     for role in selected_roles:
         if role == "exclude":
             continue
         for source in getattr(profile, role):
-            path = Path(source).expanduser().resolve(strict=False)
-            if path == home:
-                warnings.append(f"{role}:{path} points to the user home directory")
-            elif _is_path_or_child(path, downloads):
-                warnings.append(f"{role}:{path} is under Downloads")
-            elif _is_path_or_child(path, library_caches):
-                warnings.append(f"{role}:{path} is under Library/Caches")
-            elif _contains_high_risk_cache_token(path):
-                warnings.append(f"{role}:{path} looks like an application cache directory")
-    return sorted(dict.fromkeys(warnings))
+            classification = classify_source_path(source, role=role, user_home=user_home)
+            if classification.category in {"blocked", "noisy"}:
+                details.append(classification)
+    unique: dict[tuple[str, str, str], SourcePathClassification] = {}
+    for item in details:
+        unique[(item.role, item.path, item.reason)] = item
+    return sorted(unique.values(), key=lambda item: (item.role, item.path, item.reason))
+
+
+def classify_source_path(
+    source: str | Path,
+    *,
+    role: SourceRole = "library",
+    user_home: Path | None = None,
+) -> SourcePathClassification:
+    role = normalize_role(role)
+    path = Path(source).expanduser().resolve(strict=False)
+    home = (user_home or Path.home()).expanduser().resolve(strict=False)
+    downloads = home / "Downloads"
+    library_caches = home / "Library" / "Caches"
+    parts = [part.lower() for part in path.parts]
+
+    if role == "exclude":
+        return SourcePathClassification(role, str(path), "trusted", "exclude paths are never indexed")
+    if path == home:
+        return SourcePathClassification(role, str(path), "blocked", "points to the user home directory")
+    if _is_path_or_child(path, downloads):
+        return SourcePathClassification(role, str(path), "blocked", "is under Downloads")
+    if _is_path_or_child(path, library_caches):
+        return SourcePathClassification(role, str(path), "blocked", "is under Library/Caches")
+    if ".trash" in parts or "trash" in parts:
+        return SourcePathClassification(role, str(path), "blocked", "is under a trash directory")
+    if any(part in BLOCKED_SOURCE_DIR_NAMES for part in parts):
+        return SourcePathClassification(role, str(path), "blocked", "looks like cache, dependency, or temporary data")
+    if _contains_high_risk_cache_token(path):
+        return SourcePathClassification(role, str(path), "blocked", "looks like an application cache directory")
+    if any(part in NOISY_SOURCE_DIR_NAMES for part in parts):
+        return SourcePathClassification(role, str(path), "noisy", "looks like generated output or artifacts")
+    if path.is_file() and path.suffix.lower() == ".pptx":
+        return SourcePathClassification(role, str(path), "trusted", "pptx file")
+    return SourcePathClassification(role, str(path), "candidate", "candidate source path")
 
 
 def write_scan_state(
@@ -166,6 +247,29 @@ def write_scan_state(
     }
     path.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
     return path
+
+
+def write_index_progress_state(home_dir: Path, state: dict[str, object]) -> Path:
+    path = index_progress_path_for_home(home_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"schema_version": "1.0", **state}
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+def load_index_progress_state(home_dir: Path) -> dict[str, object] | None:
+    path = index_progress_path_for_home(home_dir)
+    if not path.exists():
+        return None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise SourceError(f"Cannot read index progress: {path}", code="SOURCE_INDEX_PROGRESS_READ_FAILED") from exc
+    except json.JSONDecodeError as exc:
+        raise SourceError(f"Invalid JSON in index progress: {path}", code="SOURCE_INDEX_PROGRESS_INVALID") from exc
+    if not isinstance(raw, dict):
+        raise SourceError("Invalid index progress format", code="SOURCE_INDEX_PROGRESS_INVALID")
+    return raw
 
 
 def load_scan_state(home_dir: Path) -> dict[str, object] | None:
@@ -330,6 +434,12 @@ def scan_sources(profile: SourceProfile, roles: list[SourceRole] | None = None) 
         "file_count": result.file_count,
         "pptx_count": len(result.pptx_files),
         "estimated_pages": max(0, result.file_count),
+        "estimated_file_count": result.file_count,
+        "scale_estimate": {
+            "kind": "file_count",
+            "value": result.file_count,
+            "label": "rough file count",
+        },
         "excluded_directories": sorted(result.excluded_directories),
     }
 

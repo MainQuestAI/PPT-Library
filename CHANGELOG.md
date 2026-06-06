@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.4.0] - 2026-06-06
+
+### Added
+- `ppt-lib insights key-pages` for reusable key page reports.
+- `ppt-lib insights review-pack` for JSONL/JSON slide review exports.
+- Structured `record-deal` description fields: `--description`, `--industry`, `--scenario`, and `--tags`.
+- Search JSON and HTML now expose key page and business ranking signals.
+- Synthetic asset intelligence demo deck generator.
+- Open-source release check script and public release checklist.
+
+### Changed
+- Demo deck generation now uses `python-pptx` through the optional `demo` extra.
+- Search review HTML has responsive mobile layout and wraps long metadata fields.
+- README, English README, Quick Start, Agent Skill, and CLI spec now include the asset intelligence workflow.
+
+### Tests
+- Current automated baseline: 518 tests.
+- Added CLI coverage for insights, review-pack exports, structured deal notes, and search explainability fields.
+
 ## [1.3.0] - 2026-05-28
 
 ### Added

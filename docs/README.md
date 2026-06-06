@@ -7,6 +7,7 @@ This folder contains the public documentation for PPT Library. Internal planning
 | File | Purpose |
 |---|---|
 | [quick-start-guide.md](quick-start-guide.md) | End-to-end setup, source manifest, indexing, and search flow |
+| [guides/agent-install-and-build-guideline.md](guides/agent-install-and-build-guideline.md) | Agent-driven CLI installation, guided source selection, manifest generation, dry-run reporting, and indexing supervision |
 | [guides/library-build-guideline.md](guides/library-build-guideline.md) | Safe local library build process |
 | [guides/model-compatibility.md](guides/model-compatibility.md) | Embedding, LLM, and vision provider guidance |
 | [specs/README.md](specs/README.md) | Module-level implementation specs |

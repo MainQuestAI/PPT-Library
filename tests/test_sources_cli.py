@@ -4,7 +4,8 @@ import json
 from pathlib import Path
 
 from ppt_lib.cli import main
-from ppt_lib.indexer import IndexResult
+from ppt_lib.indexer import ErrorRecord, IndexResult
+from ppt_lib.sources import classify_source_path
 
 
 def _read_json(capsys):
@@ -68,6 +69,85 @@ def test_cli_init_non_interactive_missing_manifest_returns_error(tmp_path: Path,
 
     assert exit_code == 1
     assert payload["_errors"][0]["code"] == "INIT_MANIFEST_REQUIRED"
+
+
+def test_cli_sources_manifest_writes_manifest_and_summary(tmp_path: Path, capsys) -> None:
+    library = tmp_path / "library"
+    baseline = tmp_path / "baseline.pptx"
+    exclude = tmp_path / "library" / "exports"
+    library.mkdir()
+    exclude.mkdir()
+    baseline.write_text("pptx", encoding="utf-8")
+    manifest_output = tmp_path / "home" / "sources" / "sources-manifest.json"
+    summary_output = tmp_path / "home" / "sources" / "onboarding-summary.md"
+
+    exit_code = main([
+        "--home-dir", str(tmp_path / "home"),
+        "sources", "manifest",
+        "--library", str(library),
+        "--library", str(library),
+        "--baseline", str(baseline),
+        "--exclude", str(exclude),
+        "--manifest-output", str(manifest_output),
+        "--summary-output", str(summary_output),
+        "--output", "json",
+    ])
+    payload = _read_json(capsys)
+    manifest = json.loads(manifest_output.read_text(encoding="utf-8"))
+
+    assert exit_code == 0
+    assert payload["operation"] == "manifest"
+    assert payload["counts"] == {"baseline": 1, "library": 1, "exclude": 1}
+    assert payload["rejected_sources"] == []
+    assert payload["risk_warnings"] == []
+    assert manifest["sources"]["library"] == [str(library.resolve())]
+    assert manifest["sources"]["baseline"] == [str(baseline.resolve())]
+    assert summary_output.exists()
+    assert "ppt-lib init --manifest" in payload["next_commands"][0]
+
+
+def test_cli_sources_manifest_rejects_missing_and_risky_paths(tmp_path: Path, capsys) -> None:
+    safe_library = tmp_path / "library"
+    safe_library.mkdir()
+    missing = tmp_path / "missing"
+    risky = Path.home() / "Downloads" / "__ppt_lib_manifest_risky__"
+    manifest_output = tmp_path / "home" / "sources" / "sources-manifest.json"
+
+    exit_code = main([
+        "--home-dir", str(tmp_path / "home"),
+        "sources", "manifest",
+        "--library", str(safe_library),
+        "--library", str(missing),
+        "--baseline", str(risky),
+        "--manifest-output", str(manifest_output),
+        "--output", "json",
+    ])
+    payload = _read_json(capsys)
+    manifest = json.loads(manifest_output.read_text(encoding="utf-8"))
+
+    assert exit_code == 0
+    rejected_categories = {item["category"] for item in payload["rejected_sources"]}
+    assert rejected_categories == {"missing", "blocked"}
+    assert payload["risk_warnings"]
+    assert manifest["sources"]["library"] == [str(safe_library.resolve())]
+    assert manifest["sources"]["baseline"] == []
+
+
+def test_source_path_classifier_covers_noisy_and_blocked_paths(tmp_path: Path) -> None:
+    cases = [
+        (Path.home() / "Downloads" / "deck.pptx", "blocked"),
+        (Path.home() / ".Trash" / "deck.pptx", "blocked"),
+        (tmp_path / "site-packages" / "template.pptx", "blocked"),
+        (tmp_path / "node_modules" / "template.pptx", "blocked"),
+        (tmp_path / "微信" / "cache.pptx", "blocked"),
+        (tmp_path / "WPS Cloud Files" / "deck.pptx", "blocked"),
+        (tmp_path / "project" / "outputs", "noisy"),
+        (tmp_path / "project" / "exports", "noisy"),
+        (tmp_path / "project" / "artifacts", "noisy"),
+    ]
+
+    for path, expected in cases:
+        assert classify_source_path(path, role="library").category == expected
 
 
 def test_cli_sources_add_list_scan_and_exclusions(tmp_path: Path, capsys) -> None:
@@ -238,6 +318,76 @@ def test_cli_sources_scan_apply_writes_scan_state_and_authorizes_index(
     assert index_result == 0
     assert index_payload["pptx_count"] == 0
     assert indexed_paths == []
+
+
+def test_cli_index_from_sources_writes_progress_and_status_reports_it(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    library = tmp_path / "library"
+    library.mkdir()
+    pptx_path = library / "deck.pptx"
+    pptx_path.write_text("pptx", encoding="utf-8")
+    manifest = tmp_path / "sources-manifest.json"
+    manifest.write_text(json.dumps({"sources": {"library": [str(library)]}}, ensure_ascii=False), encoding="utf-8")
+
+    def fake_index_file(path: Path, settings, full: bool = False) -> IndexResult:
+        return IndexResult(path, "indexed", 1, [], [])
+
+    monkeypatch.setattr("ppt_lib.cli.index_file", fake_index_file)
+    assert main(["--home-dir", str(tmp_path), "init", "--manifest", str(manifest), "--non-interactive", "--output", "json"]) == 0
+    _read_json(capsys)
+    assert main(["--home-dir", str(tmp_path), "sources", "scan", "--apply", "--output", "json"]) == 0
+    _read_json(capsys)
+
+    index_result = main(["--home-dir", str(tmp_path), "index", "--from-sources"])
+    index_payload = _read_json(capsys)
+    status_result = main(["--home-dir", str(tmp_path), "status", "--output", "json"])
+    status_payload = _read_json(capsys)
+
+    progress_path = tmp_path / "sources" / "index-progress.json"
+    progress = json.loads(progress_path.read_text(encoding="utf-8"))
+    assert index_result == 0
+    assert index_payload["index_progress_path"] == str(progress_path.resolve())
+    assert progress["status"] == "completed"
+    assert progress["total_pptx"] == 1
+    assert progress["processed_pptx"] == 1
+    assert progress["failed_pptx"] == 0
+    assert status_result == 0
+    assert status_payload["sources_health"]["index_progress"]["status"] == "completed"
+
+
+def test_cli_index_from_sources_progress_records_failed_count(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    library = tmp_path / "library"
+    library.mkdir()
+    pptx_path = library / "deck.pptx"
+    pptx_path.write_text("pptx", encoding="utf-8")
+    manifest = tmp_path / "sources-manifest.json"
+    manifest.write_text(json.dumps({"sources": {"library": [str(library)]}}, ensure_ascii=False), encoding="utf-8")
+
+    def fake_index_file(path: Path, settings, full: bool = False) -> IndexResult:
+        return IndexResult(path, "failed", 0, [], [ErrorRecord("FAKE_INDEX_FAILED", "bad", "indexer")])
+
+    monkeypatch.setattr("ppt_lib.cli.index_file", fake_index_file)
+    assert main(["--home-dir", str(tmp_path), "init", "--manifest", str(manifest), "--non-interactive", "--output", "json"]) == 0
+    _read_json(capsys)
+    assert main(["--home-dir", str(tmp_path), "sources", "scan", "--apply", "--output", "json"]) == 0
+    _read_json(capsys)
+
+    index_result = main(["--home-dir", str(tmp_path), "index", "--from-sources"])
+    payload = _read_json(capsys)
+    progress = json.loads((tmp_path / "sources" / "index-progress.json").read_text(encoding="utf-8"))
+
+    assert index_result == 1
+    assert payload["_errors"][0]["code"] == "FAKE_INDEX_FAILED"
+    assert progress["status"] == "completed"
+    assert progress["processed_pptx"] == 1
+    assert progress["failed_pptx"] == 1
 
 
 def test_cli_index_from_sources_rejects_stale_scan_state(tmp_path: Path, capsys) -> None:

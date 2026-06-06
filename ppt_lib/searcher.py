@@ -91,6 +91,11 @@ class _SearchRow(TypedDict):
     version_role: str | None
     is_representative_version: bool | None
     family_duplicate_count: int | None
+    importance_score: float | None
+    importance_reason: str | None
+    page_role: str | None
+    needs_visual: bool | None
+    importance_status: str | None
 
 
 _SEMANTIC_SCORE_WEIGHT = 0.7
@@ -219,6 +224,7 @@ def load_search_rows(
     has_canonical = "canonical_slide_id" in slide_columns
     has_screenshot_table = _table_exists(conn, "screenshots")
     has_versions = _table_exists(conn, "presentation_versions") and _table_exists(conn, "deck_families")
+    has_slide_importance = _table_exists(conn, "slide_importance")
 
     select_parts: list[tuple[str, str]] = [
         ("s.id", "id"),
@@ -265,6 +271,18 @@ def load_search_rows(
         )
     else:
         select_fields += ", NULL AS deck_family_id, NULL AS version_role, NULL AS is_representative_version, NULL AS family_duplicate_count"
+    importance_join = ""
+    if has_slide_importance:
+        importance_join = "LEFT JOIN slide_importance si ON si.slide_id = s.id"
+        select_fields += (
+            ", si.importance_score AS importance_score, si.importance_reason AS importance_reason, "
+            "si.page_role AS page_role, si.needs_visual AS needs_visual, si.status AS importance_status"
+        )
+    else:
+        select_fields += (
+            ", NULL AS importance_score, NULL AS importance_reason, NULL AS page_role, "
+            "NULL AS needs_visual, NULL AS importance_status"
+        )
 
     narrative_filter = ""
     params: list[object] = [int(include_assembled), int(dedupe_lineage)]
@@ -288,6 +306,7 @@ def load_search_rows(
         JOIN presentations p ON p.id = s.presentation_id
         {screenshot_join}
         {version_join}
+        {importance_join}
         WHERE s.embedding IS NOT NULL
           AND (? OR s.origin_type != 'assembled_output')
           AND (? = 0 OR s.origin_type != 'assembled_output')
@@ -300,7 +319,18 @@ def load_search_rows(
 
     aliases = [
         alias for _, alias in select_parts
-    ] + ["screenshot_path", "deck_family_id", "version_role", "is_representative_version", "family_duplicate_count"]
+    ] + [
+        "screenshot_path",
+        "deck_family_id",
+        "version_role",
+        "is_representative_version",
+        "family_duplicate_count",
+        "importance_score",
+        "importance_reason",
+        "page_role",
+        "needs_visual",
+        "importance_status",
+    ]
     alias_to_index = {alias: index for index, alias in enumerate(aliases)}
 
     canonical_ids: set[int] = set()
@@ -338,6 +368,7 @@ def load_search_rows(
         lost_count = values.get("lost_count")
         reuse_count = values.get("reuse_count")
         last_deal_outcome = values.get("last_deal_outcome")
+        needs_visual_value = values.get("needs_visual")
 
         slide_id = values.get("id")
         if slide_id is None:
@@ -363,6 +394,11 @@ def load_search_rows(
                     "lost_count": int(lost_count or 0),
                     "reuse_count": int(reuse_count or 0),
                     "last_deal_outcome": last_deal_outcome,
+                    "importance_score": values.get("importance_score"),
+                    "importance_reason": values.get("importance_reason"),
+                    "page_role": values.get("page_role"),
+                    "needs_visual": _optional_bool(needs_visual_value),
+                    "importance_status": values.get("importance_status"),
                 },
                 "slide_index": int(slide_index or 0),
                 "source_file": source_file,
@@ -376,6 +412,11 @@ def load_search_rows(
                 "version_role": values.get("version_role") if isinstance(values.get("version_role"), str) else None,
                 "is_representative_version": _optional_bool(values.get("is_representative_version")),
                 "family_duplicate_count": _optional_int(values.get("family_duplicate_count")),
+                "importance_score": values.get("importance_score") if isinstance(values.get("importance_score"), int | float) else None,
+                "importance_reason": values.get("importance_reason") if isinstance(values.get("importance_reason"), str) else None,
+                "page_role": values.get("page_role") if isinstance(values.get("page_role"), str) else None,
+                "needs_visual": _optional_bool(needs_visual_value),
+                "importance_status": values.get("importance_status") if isinstance(values.get("importance_status"), str) else None,
             }
         )
 

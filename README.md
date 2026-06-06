@@ -1,6 +1,6 @@
 # PPT Library
 
-PPT Library 是一个本地优先的 PPT 资产库 CLI。它把历史 PPTX 按页入库，让人类和 AI Agent 都可以搜索、筛选、复用、组装和追踪幻灯片资产。
+PPT Library 是一个本地优先的 PPTX 资产库 CLI。它把历史 PPT 按页入库，让人类和 AI Agent 都可以搜索、审查、复用、组装和追踪幻灯片资产。
 
 它适合这些场景：
 
@@ -27,7 +27,9 @@ PPT Library 是一个本地优先的 PPT 资产库 CLI。它把历史 PPTX 按�
 | `ppt_lib/` | CLI 和核心运行逻辑 |
 | `skills/ppt-library/` | 面向 Agent 的 Skill，说明 Agent 如何安全调用 `ppt-lib` |
 | `docs/quick-start-guide.md` | 从安装到建库、搜索的完整上手指南 |
+| `docs/guides/agent-install-and-build-guideline.md` | Agent 安装 CLI、收集高价值资产路径、生成 manifest 和启动建库的设计剧本 |
 | `docs/guides/library-build-guideline.md` | 资料库构建流程和安全扫描边界 |
+| `docs/guides/asset-intelligence-demo.md` | 用合成 PPT 演示关键页、战绩、复用追踪和业务排序闭环 |
 | `docs/guides/model-compatibility.md` | LM Studio、Ollama、OpenAI-compatible API 配置说明 |
 | `docs/specs/` | CLI、数据库、搜索、截图、视觉理解等模块规格 |
 
@@ -74,22 +76,29 @@ pip install -e .
 uv run ppt-lib setup --quick
 
 # 2. 创建资料源清单
+uv run ppt-lib sources manifest --library /absolute/path/to/ppt-folder --manifest-output ./ppt-sources.json
+
+# 3. 将资料源清单写入生效 profile
 uv run ppt-lib init --manifest ./ppt-sources.json --non-interactive
 
-# 3. 预览扫描范围
+# 4. 预览扫描范围
 uv run ppt-lib sources scan --dry-run
 
-# 4. 确认扫描范围并写入本地状态
+# 5. 确认扫描范围并写入本地状态
 uv run ppt-lib sources scan --apply
 
-# 5. 建库
+# 6. 建库
 uv run ppt-lib index --from-sources
 
-# 6. 搜索并生成 HTML 结果页
+# 7. 搜索并生成 HTML 结果页
 uv run ppt-lib search "技术架构" --html
+
+# 8. 补齐 Deck 理解并查看关键页
+uv run ppt-lib enrich-decks --pending --limit 20
+uv run ppt-lib insights key-pages --output json
 ```
 
-搜索结果默认输出到 `~/.ppt-library/html/search.html`。
+搜索结果默认输出到 `~/.ppt-library/html/search-review-*.html`。
 
 一个最小资料源清单示例：
 
@@ -110,6 +119,8 @@ uv run ppt-lib search "技术架构" --html
 
 Agent 调用时建议把 `ppt-lib` 当作稳定工具入口，并优先读取 JSON 输出。
 
+如果用户要求 Agent 安装 PPT Library CLI，并希望安装后直接进入建库引导，先读 [Agent Install and Guided Library Build Design](docs/guides/agent-install-and-build-guideline.md)。该文档定义了安装、用户路径问答、`sources-manifest.json` 生成、dry-run 汇报和建库监控流程。
+
 ```bash
 # 1. 用临时 home-dir 做 smoke test，避免误扫真实文件
 uv run ppt-lib --home-dir /tmp/ppt-lib-smoke setup --quick --non-interactive
@@ -118,14 +129,22 @@ uv run ppt-lib --home-dir /tmp/ppt-lib-smoke status --output json
 uv run ppt-lib --home-dir /tmp/ppt-lib-smoke vision --test
 
 # 2. 用户确认资料源后再建库
+uv run ppt-lib sources manifest --library /absolute/path/to/ppt-folder --manifest-output ~/.ppt-library/sources/sources-manifest.json --output json
+uv run ppt-lib init --manifest ~/.ppt-library/sources/sources-manifest.json --non-interactive --output json
 uv run ppt-lib sources scan --dry-run --output json
 uv run ppt-lib sources scan --apply --output json
 uv run ppt-lib index --from-sources
+uv run ppt-lib status --output json
 
 # 3. 搜索时使用 JSON，并检查 _errors
 uv run ppt-lib search "会员运营案例" --top-k 8 --output json
 
-# 4. 需要组装时先 dry-run，再执行确认后的 plan
+# 4. 需要资产经营视角时先查关键页，再导出审查包
+uv run ppt-lib enrich-decks --pending --limit 20 --output json
+uv run ppt-lib insights key-pages --output json
+uv run ppt-lib insights review-pack --output /tmp/ppt-lib-review-pack.jsonl
+
+# 5. 需要组装时先 dry-run，再执行确认后的 plan
 uv run ppt-lib compose --brief "生成一份客户成功案例方案" --dry-run
 uv run ppt-lib compose --confirm /path/to/narrative-plan.json
 ```
@@ -134,8 +153,10 @@ Agent 集成要点：
 
 - 默认用 `--output json`，以 stdout JSON 作为结果依据。
 - 汇报成功前必须检查 `_errors`、failed jobs 和 fallback warning。
+- 首次建库优先用 `sources manifest` 收敛用户确认的高价值路径，再 `init --manifest` 写入 profile。
 - 建库前先执行 `sources scan --dry-run`，让用户确认范围后再 `sources scan --apply`。
-- 不要扫描下载目录、缓存目录、聊天软件文件缓存或其他高风险目录，除非用户明确确认。
+- 不要扫描下载目录、回收站、缓存目录、依赖包目录、聊天软件文件缓存或其他高风险目录，除非用户明确确认。
+- 长任务期间用 `status --output json` 查看 `sources_health.index_progress`。
 - `watch` 是长运行命令，只在用户明确要求持续监听时启动。
 - 客户文件路径、真实 PPT、截图、HTML 预览和本地数据库都应留在用户本机。
 
@@ -182,6 +203,10 @@ Use the ppt-library skill. Check whether PPT Library is usable on this machine w
 | 查看某个 PPT 家族 | `ppt-lib versions inspect <family-id>` |
 | 重算版本归族 | `ppt-lib versions recompute --dry-run` |
 | 补齐 Deck 理解 | `ppt-lib enrich-decks --pending --limit 20` |
+| 查看关键页候选 | `ppt-lib insights key-pages --output json` |
+| 导出审查包 | `ppt-lib insights review-pack --output /path/to/review-pack.jsonl` |
+| 录入战绩描述 | `ppt-lib record-deal --name "..." --outcome won --description "..." --industry retail --scenario proposal --tags demo,key-page` |
+| 按战绩增强搜索 | `ppt-lib search "查询内容" --ranking business --output json` |
 | 自动组装预览 | `ppt-lib compose --brief "..." --dry-run` |
 | 按确认计划组装 | `ppt-lib compose --confirm /path/to/narrative-plan.json` |
 
@@ -229,6 +254,8 @@ PPT Library 默认将数据保存在本机 `~/.ppt-library/`：
 
 - [Quick Start Guide](docs/quick-start-guide.md)
 - [Library Build Guideline](docs/guides/library-build-guideline.md)
+- [Asset Intelligence Demo](docs/guides/asset-intelligence-demo.md)
+- [Open Source Release Checklist](docs/guides/open-source-release-checklist.md)
 - [Model Compatibility](docs/guides/model-compatibility.md)
 - [Agent Adapters](skills/ppt-library/references/agent-adapters.md)
 - [Specs](docs/specs/README.md)
@@ -239,11 +266,12 @@ PPT Library 默认将数据保存在本机 `~/.ppt-library/`：
 uv run --extra test pytest
 uv run --extra lint ruff check .
 uv run --extra lint mypy
+uv run python scripts/release_check.py --output json
 uv build
 ```
 
-当前测试基线：506 automated tests。
+当前测试基线：518 automated tests。
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+Apache License 2.0. See [LICENSE](LICENSE).
