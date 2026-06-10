@@ -106,7 +106,7 @@ class WorkspaceProfileRecord:
 
 def connect(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path, timeout=5)
+    conn = sqlite3.connect(db_path, timeout=60)
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
 

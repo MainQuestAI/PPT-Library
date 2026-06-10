@@ -19,6 +19,7 @@ It is useful when:
 - **Compose workflow**: selects relevant slides from a brief and builds reviewable PPTX drafts.
 - **Agent-friendly CLI**: JSON output for Codex, Claude Code, Hermes, OpenCode, and other agent runtimes.
 - **Local-first storage**: SQLite, rendered screenshots, HTML previews, and derived assets stay on the local machine.
+- **Recommended recognition stack**: local embeddings plus PaddleOCR MCP for slide OCR, layout, and chart parsing with low local memory pressure.
 
 ## What's Included
 
@@ -30,14 +31,16 @@ It is useful when:
 | `docs/guides/asset-intelligence-demo.md` | Synthetic demo for key pages, review packs, usage tracking, and business ranking |
 | `docs/guides/library-build-guideline.md` | Safe local library build process |
 | `docs/guides/open-source-release-checklist.md` | Release hygiene checklist for public snapshots |
-| `docs/guides/model-compatibility.md` | LM Studio, Ollama, and OpenAI-compatible model guidance |
+| `docs/guides/model-compatibility.md` | LM Studio, PaddleOCR MCP, Ollama, and OpenAI-compatible model guidance |
+| `docs/guides/recommended-implementation.md` | Recommended local embedding + PaddleOCR MCP implementation |
 | `docs/specs/` | Module specs for CLI, database, search, screenshots, and vision |
 
 ## Requirements
 
 - Python 3.12+
 - LibreOffice, optional, used for PPTX slide screenshots
-- LM Studio, Ollama, or an OpenAI-compatible API, optional, used for embeddings, vision understanding, and LLM annotation
+- LM Studio, Ollama, or an OpenAI-compatible API, optional, used for embeddings
+- PaddleOCR MCP, optional and recommended for PPT slide OCR, layout, and chart parsing
 
 Without a model service, PPT Library can still extract text and run lexical search. Search quality improves significantly after configuring embeddings.
 
@@ -51,6 +54,9 @@ cd PPT-Library
 
 # Install development and test dependencies.
 uv sync --extra test --extra lint
+
+# Recommended when using PaddleOCR MCP.
+uv sync --extra test --extra lint --extra paddleocr
 
 # Run the CLI from the source tree.
 uv run ppt-lib --help
@@ -75,6 +81,10 @@ Use this path for your first manual library build and search.
 # 1. Initialize configuration.
 uv run ppt-lib setup --quick
 
+# Recommended recognition stack: local embeddings + PaddleOCR MCP.
+uv run ppt-lib setup --mode lmstudio
+uv run ppt-lib setup --mode paddleocr-mcp
+
 # 2. Create a source manifest.
 uv run ppt-lib sources manifest --library /absolute/path/to/ppt-folder --manifest-output ./ppt-sources.json
 
@@ -88,7 +98,7 @@ uv run ppt-lib sources scan --dry-run
 uv run ppt-lib sources scan --apply
 
 # 6. Build the index.
-uv run ppt-lib index --from-sources
+uv run ppt-lib index --from-sources --file-workers 2
 
 # 7. Search and generate an HTML review page.
 uv run ppt-lib search "technical architecture" --html
@@ -268,7 +278,7 @@ uv run python scripts/release_check.py --output json
 uv build
 ```
 
-Current baseline: 518 automated tests.
+Current baseline: 534 automated tests.
 
 ## License
 

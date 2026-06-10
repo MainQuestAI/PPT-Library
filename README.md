@@ -19,6 +19,7 @@ PPT Library 是一个本地优先的 PPTX 资产库 CLI。它把历史 PPT 按�
 - **自动组装**：根据 brief 选择相关页面，生成可审查的组装清单和 PPTX 草稿。
 - **Agent 友好**：CLI 支持 JSON 输出，便于 Codex、Claude Code、Hermes、OpenCode 等 Agent 调用。
 - **本地优先**：SQLite、截图、HTML 预览和索引资产默认存储在本机。
+- **推荐识别链路**：本地 embedding + PaddleOCR MCP，可在较低本地资源占用下补齐 PPT 页面的 OCR、版式和图表识别。
 
 ## 组成部分
 
@@ -30,14 +31,16 @@ PPT Library 是一个本地优先的 PPTX 资产库 CLI。它把历史 PPT 按�
 | `docs/guides/agent-install-and-build-guideline.md` | Agent 安装 CLI、收集高价值资产路径、生成 manifest 和启动建库的设计剧本 |
 | `docs/guides/library-build-guideline.md` | 资料库构建流程和安全扫描边界 |
 | `docs/guides/asset-intelligence-demo.md` | 用合成 PPT 演示关键页、战绩、复用追踪和业务排序闭环 |
-| `docs/guides/model-compatibility.md` | LM Studio、Ollama、OpenAI-compatible API 配置说明 |
+| `docs/guides/model-compatibility.md` | LM Studio、PaddleOCR MCP、Ollama、OpenAI-compatible API 配置说明 |
+| `docs/guides/recommended-implementation.md` | 推荐的本地 embedding + PaddleOCR MCP 实施方案 |
 | `docs/specs/` | CLI、数据库、搜索、截图、视觉理解等模块规格 |
 
 ## Requirements
 
 - Python 3.12+
 - LibreOffice，可选，用于 PPTX 页面截图
-- LM Studio、Ollama 或 OpenAI-compatible API，可选，用于 embedding、视觉理解和 LLM 标注
+- LM Studio、Ollama 或 OpenAI-compatible API，可选，用于 embedding
+- PaddleOCR MCP，可选，推荐用于 PPT 页面 OCR、版式和图表识别
 
 没有模型服务时，PPT Library 仍可做基础文本抽取和关键词搜索；配置 embedding 后，搜索质量会明显提升。
 
@@ -51,6 +54,9 @@ cd PPT-Library
 
 # 安装开发和测试依赖
 uv sync --extra test --extra lint
+
+# 推荐：同时安装 PaddleOCR MCP 接入依赖
+uv sync --extra test --extra lint --extra paddleocr
 
 # 从源码目录运行 CLI
 uv run ppt-lib --help
@@ -75,6 +81,10 @@ pip install -e .
 # 1. 初始化配置
 uv run ppt-lib setup --quick
 
+# 推荐识别方案：本地 embedding + PaddleOCR MCP
+uv run ppt-lib setup --mode lmstudio
+uv run ppt-lib setup --mode paddleocr-mcp
+
 # 2. 创建资料源清单
 uv run ppt-lib sources manifest --library /absolute/path/to/ppt-folder --manifest-output ./ppt-sources.json
 
@@ -88,7 +98,7 @@ uv run ppt-lib sources scan --dry-run
 uv run ppt-lib sources scan --apply
 
 # 6. 建库
-uv run ppt-lib index --from-sources
+uv run ppt-lib index --from-sources --file-workers 2
 
 # 7. 搜索并生成 HTML 结果页
 uv run ppt-lib search "技术架构" --html
@@ -270,7 +280,7 @@ uv run python scripts/release_check.py --output json
 uv build
 ```
 
-当前测试基线：518 automated tests。
+当前测试基线：534 automated tests。
 
 ## License
 

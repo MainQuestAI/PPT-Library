@@ -39,11 +39,15 @@ Tasks: T1, T15
 | `embedding_dimensions` | `1536` | 当前库使用的向量维度，LM Studio nomic 样本链路使用 `768` |
 | `embedding_timeout_seconds` | `30` | embedding provider HTTP 超时 |
 | `vision_provider` | `auto` | 本地优先，云端 fallback |
+| `paddleocr_mcp_pipeline` | `PaddleOCR-VL-1.6` | PaddleOCR MCP 使用的产线 |
+| `paddleocr_mcp_source` | `aistudio` | PaddleOCR MCP 来源，支持 `aistudio` 或 `self_hosted` |
+| `paddleocr_mcp_base_url` | `null` | 可选 AI Studio 或自托管 endpoint；token 不写入普通配置 |
 | `lmstudio_base_url` | `http://127.0.0.1:1234/v1` | LM Studio OpenAI-compatible API |
 | `lmstudio_embedding_model` | `text-embedding-nomic-embed-text-v1.5` | 本地 embedding 模型 |
 | `lmstudio_vision_model` | `""` | 本地 vision/chat 模型；LM Studio setup 会尽量自动探测，失败时需用户显式配置 |
 | `vision_max_slides_per_file` | `null` | 可选 vision 调用上限；用于复杂样本测试限流 |
 | `max_workers` | `4` | 截图/索引默认并发 |
+| `index --from-sources --file-workers` | `1` | PPTX 文件级并行；适合 PaddleOCR MCP 批量识别时手动提高 |
 | `schema_version` | `1.0` | JSON Schema 版本 |
 | `search_top_k` | `5` | 默认搜索结果数 |
 | `search_threshold` | `0.5` | 默认相似度阈值 |

@@ -8,7 +8,9 @@ from ppt_lib.config import load_settings
 from ppt_lib.vision import (
     CloudVisionProvider,
     LMStudioVisionProvider,
+    MMXVisionProvider,
     OllamaVisionProvider,
+    PaddleOCRMCPVisionProvider,
     TextExtractionVisionProvider,
     VisionProviderError,
     VisionResult,
@@ -35,6 +37,7 @@ def test_build_chain_local_first(tmp_path: Path) -> None:
     assert [type(provider) for provider in chain] == [
         OllamaVisionProvider,
         LMStudioVisionProvider,
+        MMXVisionProvider,
         CloudVisionProvider,
         TextExtractionVisionProvider,
     ]
@@ -82,6 +85,25 @@ def test_text_extraction_last_resort(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert result.source == "text_extraction"
     assert result.text_content == "plain text"
     assert result.confidence == 0.2
+
+
+def test_paddleocr_mcp_explicit_provider_error_stops_instead_of_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailingPaddleProvider:
+        name = "paddleocr_mcp"
+
+        def describe_slide(self, image_path: Path, fallback_text: str = "") -> VisionResult:
+            raise VisionProviderError("service down", code="VISION_PROVIDER_UNAVAILABLE")
+
+    monkeypatch.setattr("ppt_lib.vision.build_vision_chain", lambda settings: [FailingPaddleProvider(), TextExtractionVisionProvider()])
+    settings = load_settings({"home_dir": tmp_path, "vision_provider": "paddleocr_mcp"}, config_path=tmp_path / "config.yml")
+
+    with pytest.raises(VisionProviderError) as exc_info:
+        describe_slide_with_fallback(tmp_path / "slide.png", "plain text", settings)
+
+    assert exc_info.value.code == "VISION_PROVIDER_UNAVAILABLE"
 
 
 def test_empty_image_and_empty_text_returns_warning(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -260,6 +282,134 @@ def test_cloud_fallback_used_when_local_missing(tmp_path: Path, monkeypatch: pyt
 
     assert seen_headers["Authorization"] == "Bearer secret"
     assert result.title == "Cloud"
+
+
+def test_mmx_provider_describes_slide_with_quota_check(tmp_path: Path) -> None:
+    image = tmp_path / "slide.png"
+    image.write_bytes(PNG_1X1)
+    calls: list[list[str]] = []
+
+    def fake_run(args):
+        calls.append(args)
+        if args[:2] == ["quota", "show"]:
+            return type("Completed", (), {"returncode": 0, "stdout": '{"model_remains":[]}', "stderr": ""})()
+        return type(
+            "Completed",
+            (),
+            {
+                "returncode": 0,
+                "stdout": (
+                    '{"content":"{\\"title\\":\\"MMX\\",\\"text_content\\":\\"MMX summary\\",'
+                    '\\"metadata\\":{},\\"confidence\\":0.82}"}'
+                ),
+                "stderr": "",
+            },
+        )()
+
+    provider = MMXVisionProvider(command="mmx-test", timeout_seconds=10)
+    provider._run = fake_run  # type: ignore[method-assign]
+
+    result = provider.describe_slide(image, "fallback")
+
+    assert result.title == "MMX"
+    assert result.text_content == "MMX summary"
+    assert calls[0] == ["quota", "show", "--output", "json", "--quiet", "--non-interactive"]
+    assert calls[1][:4] == ["vision", "describe", "--image", str(image)]
+
+
+def test_paddleocr_mcp_provider_formats_markdown_result(tmp_path: Path) -> None:
+    image = tmp_path / "slide.png"
+    image.write_bytes(PNG_1X1)
+    provider = PaddleOCRMCPVisionProvider(access_token="token")
+    provider._predict = lambda image_path: type(  # type: ignore[method-assign]
+        "PaddleResult",
+        (),
+        {"markdown": "# Paddle Title\n\n正文内容", "pages": 1, "images_mapping": {}},
+    )()
+
+    result = provider.describe_slide(image, "fallback")
+
+    assert result.source == "vision_model"
+    assert result.title == "Paddle Title"
+    assert result.text_content.startswith("# Paddle Title")
+    assert result.metadata["provider"] == "paddleocr_mcp"
+
+
+def test_paddleocr_mcp_provider_supports_self_hosted_endpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    image = tmp_path / "slide.png"
+    image.write_bytes(PNG_1X1)
+    seen: dict[str, object] = {}
+
+    def fake_post_json(url, payload, *, timeout_seconds, headers=None):
+        seen["url"] = url
+        seen["payload"] = payload
+        return {
+            "result": {
+                "layoutParsingResults": [
+                    {
+                        "markdown": {
+                            "text": "# Local Title\n\n本地识别",
+                            "images": {},
+                        }
+                    }
+                ]
+            }
+        }
+
+    monkeypatch.setattr("ppt_lib.vision._post_json", fake_post_json)
+    provider = PaddleOCRMCPVisionProvider(source="self_hosted", base_url="http://127.0.0.1:8765")
+
+    result = provider.describe_slide(image, "fallback")
+
+    assert seen["url"] == "http://127.0.0.1:8765/layout-parsing"
+    assert isinstance(seen["payload"], dict)
+    assert seen["payload"]["fileType"] == 1
+    assert result.title == "Local Title"
+    assert result.text_content.startswith("# Local Title")
+
+
+def test_mmx_provider_waits_for_quota_recovery_after_exit_code_4(tmp_path: Path) -> None:
+    image = tmp_path / "slide.png"
+    image.write_bytes(PNG_1X1)
+    waits: list[float] = []
+    calls: list[list[str]] = []
+
+    def fake_run(args):
+        calls.append(args)
+        if args[:2] == ["quota", "show"]:
+            return type(
+                "Completed",
+                (),
+                {
+                    "returncode": 0,
+                    "stdout": (
+                        '{"model_remains":[{"model_name":"general",'
+                        '"current_interval_remaining_percent":100,"remains_time":0}]}'
+                    ),
+                    "stderr": "",
+                },
+            )()
+        if len([call for call in calls if call[:2] == ["vision", "describe"]]) == 1:
+            return type("Completed", (), {"returncode": 4, "stdout": "", "stderr": "quota"})()
+        return type(
+            "Completed",
+            (),
+            {
+                "returncode": 0,
+                "stdout": '{"content":"{\\"title\\":\\"Resumed\\",\\"text_content\\":\\"ok\\",\\"metadata\\":{},\\"confidence\\":0.7}"}',
+                "stderr": "",
+            },
+        )()
+
+    quota_waits = iter([None, 2.5])
+    provider = MMXVisionProvider(command="mmx-test", sleeper=waits.append, clock=lambda: 1000.0)
+    provider._run = fake_run  # type: ignore[method-assign]
+    provider._quota_wait_seconds = lambda: next(quota_waits)  # type: ignore[method-assign]
+
+    result = provider.describe_slide(image, "fallback")
+
+    assert result.title == "Resumed"
+    assert waits == [2.5]
 
 
 def test_image_too_large_records_provider_error(tmp_path: Path) -> None:

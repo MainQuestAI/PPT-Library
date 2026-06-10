@@ -8,6 +8,7 @@ PPT Library 使用 embedding 模型将每页 PPT 的内容转换为向量，实�
 |---------|---------|---------|
 | 有 OpenAI API key | OpenAI text-embedding-3-small | `ppt-lib setup --quick`（自动检测） |
 | 有 LM Studio | 本地 embedding 模型 | `ppt-lib setup --quick`（自动检测） |
+| 需要低成本 OCR/视觉识别 | 本地 embedding + PaddleOCR MCP | `ppt-lib setup --mode lmstudio` 后执行 `ppt-lib setup --mode paddleocr-mcp` |
 | 有 Ollama | 本地 embedding 模型 | 手动配置 OpenAI-compatible endpoint |
 | 有国产 API key | OpenAI-compatible API | `PPT_LIB_OPENAI_API_KEY` 环境变量 |
 | 没有符合条件的方案 | 尝试本地模型安装 | 见"无 API key 怎么办" |
@@ -72,35 +73,42 @@ export PPT_LIB_OPENAI_API_KEY="your-key"
 ppt-lib setup --mode openai
 ```
 
-## Vision 方案（可选）
+## Vision / OCR 方案（可选）
 
-PPT Library 默认不开启 vision（视觉识别）。如需识别图表和截图，可选择以下方案：
+PPT Library 默认不开启 vision（视觉识别）。如需识别图表、截图、复杂版式和图片里的文字，推荐优先使用 PaddleOCR MCP。
 
-| 方案 | 模型 | 成本（1000 页） | 要求 |
+| 方案 | 模型 | 推荐场景 | 要求 |
 |------|------|----------------|------|
-| OpenAI | gpt-4o-mini | $5-10（图像输入计费） | API key |
-| LM Studio | 本地视觉模型 | 免费 | 本地 GPU |
-| Ollama | llava / moondream | 免费 | 本地 GPU |
+| PaddleOCR MCP | PaddleOCR-VL-1.6 | 批量 OCR、版式、表格、图表识别 | `paddleocr-mcp`、AI Studio token 或自托管 endpoint |
+| LM Studio | 本地视觉模型 | 小批量本地视觉理解 | 本地 GPU |
+| Ollama | llava / moondream | 本地实验和低频使用 | 本地 GPU |
+| OpenAI-compatible vision | gpt-4o-mini 等 | 高质量视觉摘要或小批量复杂页面 | API key |
 
 ```bash
-# 开启 vision（OpenAI）
-ppt-lib config set vision_provider cloud
-ppt-lib config set cloud_vision_model gpt-4o-mini
+# 推荐：本地 embedding + PaddleOCR MCP
+uv sync --extra paddleocr
+ppt-lib setup --mode lmstudio
+ppt-lib setup --mode paddleocr-mcp
+export PADDLEOCR_MCP_AISTUDIO_ACCESS_TOKEN="<your-token>"
 
 # 开启 vision（LM Studio）
 ppt-lib config set vision_provider lmstudio
 ppt-lib config set lmstudio_vision_model your-vision-model
+
+# 开启 vision（OpenAI-compatible）
+ppt-lib config set vision_provider cloud
+ppt-lib config set cloud_vision_model gpt-4o-mini
 ```
 
 ## 成本估算
 
-| 页面数 | 仅 embedding（OpenAI） | embedding + vision（OpenAI） |
-|--------|----------------------|-----------------------------|
-| 100 | $0.02 | $0.50-1.00 |
-| 1000 | $0.13 | $5.00-10.00 |
-| 10000 | $1.30 | $50.00-100.00 |
+| 页面数 | 本地 embedding + PaddleOCR MCP | embedding + vision（OpenAI-compatible） |
+|--------|-------------------------------|---------------------------------------|
+| 100 | 通常仅消耗 OCR 服务页额 | 取决于图像输入计费 |
+| 1000 | 通常仅消耗 OCR 服务页额 | 取决于图像输入计费 |
+| 10000 | 需确认 AI Studio 当日可用页额 | 取决于图像输入计费 |
 
-> 以上为估算值，实际成本取决于每页文本长度和图片大小。
+> AI Studio 免费页额和计费规则可能变化。大批量建库前，先以 AI Studio 控制台显示为准。
 
 ## 常见问题
 
@@ -112,11 +120,18 @@ ppt-lib config set lmstudio_vision_model your-vision-model
 3. 配置 `embedding_api_url=http://127.0.0.1:11434/v1`、`embedding_model=nomic-embed-text`、`embedding_dimensions=768`
 4. 运行 `ppt-lib models test` 确认 embedding 能力可用
 
+### PaddleOCR MCP 什么时候适合？
+
+- PPT 页面有大量截图、图表、表格或图片文字。
+- 不希望在本机跑大型多模态模型。
+- 需要把 OCR 结果作为可搜索 Markdown 写入 slide 文本。
+- AI Studio 账号有可用免费页额，或已经准备了自托管 PaddleOCR endpoint。
+
 ### 本地模型速度慢怎么办？
 
 - 检查是否有 GPU 加速
 - 考虑使用 CPU 版的 nomic-embed-text（小型模型）
-- 如果需要更好的性能，建议切换到云端 API
+- 视觉识别优先考虑 PaddleOCR MCP，把本地模型只用于 embedding
 
 ### 如何切换 embedding 方案？
 

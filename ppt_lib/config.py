@@ -10,7 +10,7 @@ import yaml
 from ppt_lib.settings import ConfigError, Settings, build_settings
 
 ENV_PREFIX = "PPT_LIB_"
-SENSITIVE_KEYS = {"openai_api_key", "anthropic_api_key", "vision_api_key"}
+SENSITIVE_KEYS = {"openai_api_key", "anthropic_api_key", "vision_api_key", "paddleocr_mcp_access_token"}
 WRITABLE_CONFIG_KEYS = set(Settings.model_fields) - SENSITIVE_KEYS - {"home_dir"}
 
 
@@ -25,6 +25,18 @@ ollama_vision_model: llava
 lmstudio_base_url: http://127.0.0.1:1234/v1
 lmstudio_embedding_model: text-embedding-nomic-embed-text-v1.5
 lmstudio_vision_model: ""
+mmx_command: mmx
+mmx_vision_model: default
+mmx_quota_check: true
+mmx_quota_resume: true
+mmx_quota_max_resume_seconds: 21600
+paddleocr_mcp_pipeline: PaddleOCR-VL-1.6
+paddleocr_mcp_source: aistudio
+paddleocr_mcp_base_url: null
+paddleocr_mcp_use_layout_detection: true
+paddleocr_mcp_use_chart_recognition: true
+paddleocr_mcp_use_doc_orientation_classify: false
+paddleocr_mcp_use_doc_unwarping: false
 cloud_vision_base_url: https://api.openai.com/v1
 cloud_vision_model: gpt-4o-mini
 vision_timeout_seconds: 30
@@ -54,6 +66,22 @@ SETUP_MODE_CONFIGS: dict[str, dict[str, object]] = {
         "embedding_provider": "fake",
         "embedding_model": "fake",
         "embedding_dimensions": 1536,
+    },
+    "mmx": {
+        "vision_provider": "mmx",
+        "mmx_command": "mmx",
+        "mmx_vision_model": "default",
+        "mmx_quota_check": True,
+        "mmx_quota_resume": True,
+    },
+    "paddleocr_mcp": {
+        "vision_provider": "paddleocr_mcp",
+        "paddleocr_mcp_pipeline": "PaddleOCR-VL-1.6",
+        "paddleocr_mcp_source": "aistudio",
+        "paddleocr_mcp_use_layout_detection": True,
+        "paddleocr_mcp_use_chart_recognition": True,
+        "paddleocr_mcp_use_doc_orientation_classify": False,
+        "paddleocr_mcp_use_doc_unwarping": False,
     },
 }
 

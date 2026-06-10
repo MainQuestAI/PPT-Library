@@ -4,6 +4,7 @@ import argparse
 import json
 import re
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, is_dataclass
 from datetime import UTC, datetime
 from importlib import metadata
@@ -217,7 +218,7 @@ def build_parser() -> argparse.ArgumentParser:
     setup_parser = subparsers.add_parser("setup", help="create local config and run diagnostics")
     setup_parser.add_argument(
         "--mode",
-        choices=["lmstudio", "openai", "text-extraction", "text_extraction"],
+        choices=["lmstudio", "openai", "mmx", "paddleocr-mcp", "paddleocr_mcp", "text-extraction", "text_extraction"],
         default=None,
         help="configuration mode to write",
     )
@@ -259,6 +260,7 @@ def build_parser() -> argparse.ArgumentParser:
     index_parser.add_argument("--batch", action="store_true")
     index_parser.add_argument("--full", action="store_true")
     index_parser.add_argument("--from-sources", action="store_true", help="index library sources from ppt-lib sources profile")
+    index_parser.add_argument("--file-workers", type=int, default=1, help="parallel PPTX file workers for --from-sources")
     index_parser.add_argument("--with-ai-summary", action="store_true", help="enrich indexed slides with workspace-profile-aware summaries")
 
     search_parser = subparsers.add_parser("search")
@@ -713,6 +715,7 @@ def _dispatch(args: argparse.Namespace, settings) -> tuple[dict[str, object], li
             started_at = datetime.now(UTC).isoformat()
             index_results = []
             failed_count = 0
+            file_workers = max(1, int(args.file_workers or 1))
 
             def write_progress(status: str, processed: int, *, current_file: Path | None = None) -> None:
                 write_index_progress_state(
@@ -724,6 +727,7 @@ def _dispatch(args: argparse.Namespace, settings) -> tuple[dict[str, object], li
                         "processed_pptx": processed,
                         "failed_pptx": failed_count,
                         "current_file": str(_normalize_path(current_file)) if current_file else None,
+                        "file_workers": file_workers,
                         "started_at": started_at,
                         "updated_at": datetime.now(UTC).isoformat(),
                     },
@@ -731,13 +735,24 @@ def _dispatch(args: argparse.Namespace, settings) -> tuple[dict[str, object], li
 
             write_progress("running", 0)
             try:
-                for index, path in enumerate(pptx_files, start=1):
-                    write_progress("running", index - 1, current_file=path)
-                    result = index_file(path, settings, full=args.full)
-                    index_results.append(result)
-                    if result.status == "failed" or result.errors:
-                        failed_count += 1
-                    write_progress("running", index, current_file=path)
+                if file_workers == 1 or len(pptx_files) <= 1:
+                    for index, path in enumerate(pptx_files, start=1):
+                        write_progress("running", index - 1, current_file=path)
+                        result = index_file(path, settings, full=args.full)
+                        index_results.append(result)
+                        if result.status == "failed" or result.errors:
+                            failed_count += 1
+                        write_progress("running", index, current_file=path)
+                else:
+                    with ThreadPoolExecutor(max_workers=file_workers) as executor:
+                        futures = {executor.submit(index_file, path, settings, full=args.full): path for path in pptx_files}
+                        for future in as_completed(futures):
+                            path = futures[future]
+                            result = future.result()
+                            index_results.append(result)
+                            if result.status == "failed" or result.errors:
+                                failed_count += 1
+                            write_progress("running", len(index_results), current_file=path)
                 write_progress("completed", len(pptx_files))
             except Exception:
                 processed = len(index_results)
@@ -1551,7 +1566,13 @@ def _run_setup_mode(
     if extra_keys:
         for key, value in extra_keys.items():
             try:
-                result = set_config_value(config_path, key, str(value).lower(), home_dir=settings.home_dir)
+                if value is None:
+                    raw_value = "null"
+                elif isinstance(value, bool):
+                    raw_value = "true" if value else "false"
+                else:
+                    raw_value = str(value)
+                result = set_config_value(config_path, key, raw_value, home_dir=settings.home_dir)
                 if result.changed:
                     changed_keys.append(key)
             except Exception:
@@ -1598,6 +1619,38 @@ def _run_quick_setup(settings: Any, config_path: Path, args: argparse.Namespace)
         return {"mode": None, "config_path": str(_normalize_path(config_path)), "env": env}, [
             ErrorRecord("SETUP_NEEDS_CONFIG", message, "setup"),
         ]
+    if settings.vision_provider in {"cloud", "mmx", "paddleocr_mcp"}:
+        overrides = {
+            **overrides,
+            "vision_provider": settings.vision_provider,
+            "vision_max_slides_per_file": settings.vision_max_slides_per_file,
+        }
+        if settings.vision_provider == "cloud":
+            overrides = {
+                **overrides,
+                "cloud_vision_base_url": settings.cloud_vision_base_url,
+                "cloud_vision_model": settings.cloud_vision_model,
+            }
+        if settings.vision_provider == "mmx":
+            overrides = {
+                **overrides,
+                "mmx_command": settings.mmx_command,
+                "mmx_vision_model": settings.mmx_vision_model,
+                "mmx_quota_check": settings.mmx_quota_check,
+                "mmx_quota_resume": settings.mmx_quota_resume,
+                "mmx_quota_max_resume_seconds": settings.mmx_quota_max_resume_seconds,
+            }
+        if settings.vision_provider == "paddleocr_mcp":
+            overrides = {
+                **overrides,
+                "paddleocr_mcp_pipeline": settings.paddleocr_mcp_pipeline,
+                "paddleocr_mcp_source": settings.paddleocr_mcp_source,
+                "paddleocr_mcp_base_url": settings.paddleocr_mcp_base_url,
+                "paddleocr_mcp_use_layout_detection": settings.paddleocr_mcp_use_layout_detection,
+                "paddleocr_mcp_use_chart_recognition": settings.paddleocr_mcp_use_chart_recognition,
+                "paddleocr_mcp_use_doc_orientation_classify": settings.paddleocr_mcp_use_doc_orientation_classify,
+                "paddleocr_mcp_use_doc_unwarping": settings.paddleocr_mcp_use_doc_unwarping,
+            }
 
     return _run_setup_mode(recommended_mode, settings, config_path, extra_keys=overrides)
 
@@ -1621,6 +1674,7 @@ def _interactive_setup(settings: Any, config_path: Path) -> tuple[dict[str, obje
         print("Use --mode to configure specific providers:")
         print("  ppt-lib setup --mode openai")
         print("  ppt-lib setup --mode lmstudio")
+        print("  ppt-lib setup --mode paddleocr-mcp")
         print("  ppt-lib setup --mode text-extraction")
         print()
         return {"mode": None, "status": "use_mode", "config_path": str(_normalize_path(config_path))}, []
@@ -1676,6 +1730,8 @@ def _config_overview_for_mode(mode: str, *, vision_model: str | None = None) -> 
         if vision_model:
             return f"embedding=local (768d), vision model={vision_model}, vision calls during indexing=disabled by default"
         return "embedding=local (768d), vision model=not detected yet, vision calls during indexing=disabled by default"
+    if mode in {"paddleocr_mcp", "paddleocr-mcp"}:
+        return "vision=PaddleOCR-VL-1.6 via AI Studio MCP, embedding unchanged"
     return mode
 
 

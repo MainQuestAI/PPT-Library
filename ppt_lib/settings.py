@@ -27,6 +27,19 @@ class Settings(BaseModel):
     lmstudio_base_url: str = "http://127.0.0.1:1234/v1"
     lmstudio_embedding_model: str = "text-embedding-nomic-embed-text-v1.5"
     lmstudio_vision_model: str = ""
+    mmx_command: str = "mmx"
+    mmx_vision_model: str = "default"
+    mmx_quota_check: bool = True
+    mmx_quota_resume: bool = True
+    mmx_quota_max_resume_seconds: int = Field(default=21600, ge=0)
+    paddleocr_mcp_pipeline: str = "PaddleOCR-VL-1.6"
+    paddleocr_mcp_source: str = "aistudio"
+    paddleocr_mcp_base_url: str | None = None
+    paddleocr_mcp_access_token: str | None = None
+    paddleocr_mcp_use_layout_detection: bool = True
+    paddleocr_mcp_use_chart_recognition: bool = True
+    paddleocr_mcp_use_doc_orientation_classify: bool = False
+    paddleocr_mcp_use_doc_unwarping: bool = False
     cloud_vision_base_url: str = "https://api.openai.com/v1"
     cloud_vision_model: str = "gpt-4o-mini"
     vision_timeout_seconds: int = Field(default=30, ge=1)

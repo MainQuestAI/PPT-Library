@@ -49,7 +49,7 @@ PRIVATE_PATTERNS = [
     "爱" + "帛",
     "达" + "能",
 ]
-EXPECTED_TEST_BASELINE = "518"
+EXPECTED_TEST_BASELINE = "534"
 
 
 @dataclass
@@ -178,14 +178,14 @@ def check_release_metadata(root: Path) -> CheckResult:
     changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
     license_text = (root / "LICENSE").read_text(encoding="utf-8") if (root / "LICENSE").exists() else ""
     missing: list[str] = []
-    if version != "1.4.0":
-        missing.append("pyproject version must be 1.4.0")
+    if version != "1.4.1":
+        missing.append("pyproject version must be 1.4.1")
     if version_file != version:
         missing.append("VERSION must match pyproject version")
     if EXPECTED_TEST_BASELINE not in readme:
-        missing.append("README.md test baseline must include 518")
+        missing.append(f"README.md test baseline must include {EXPECTED_TEST_BASELINE}")
     if EXPECTED_TEST_BASELINE not in readme_en:
-        missing.append("README.en.md test baseline must include 518")
+        missing.append(f"README.en.md test baseline must include {EXPECTED_TEST_BASELINE}")
     if 'license = "Apache-2.0"' not in pyproject:
         missing.append("pyproject license must be Apache-2.0")
     if "Apache License 2.0" not in readme or "Apache License 2.0" not in readme_en:
@@ -194,8 +194,8 @@ def check_release_metadata(root: Path) -> CheckResult:
         missing.append("LICENSE must contain Apache License 2.0 text")
     if f"[{version}]" not in changelog:
         missing.append("CHANGELOG.md must include current version")
-    if "docs/releases/v1.4.0.md" not in "\n".join(git_ls_files(root)):
-        missing.append("docs/releases/v1.4.0.md must exist")
+    if f"docs/releases/v{version}.md" not in "\n".join(git_ls_files(root)):
+        missing.append(f"docs/releases/v{version}.md must exist")
     if missing:
         return CheckResult("release_metadata", "fail", "Release metadata is incomplete.", details={"missing": missing})
     return CheckResult("release_metadata", "pass", "Release metadata is consistent.", details={"version": version})

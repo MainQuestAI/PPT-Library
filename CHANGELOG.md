@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.4.1] - 2026-06-10
+
+### Added
+- PaddleOCR MCP vision provider for slide OCR, layout parsing, chart recognition, and Markdown extraction.
+- `paddleocr` optional dependency extra for installing `paddleocr-mcp`.
+- `ppt-lib setup --mode paddleocr-mcp` for switching vision recognition without changing the embedding provider.
+- `ppt-lib index --from-sources --file-workers N` for PPTX file-level parallel indexing.
+- Recommended implementation guide for local embeddings plus PaddleOCR MCP.
+
+### Changed
+- Recommended model guidance now prioritizes local embeddings plus PaddleOCR MCP for low-cash-cost batch recognition.
+- SQLite connection timeout increased to make conservative file-level parallel indexing more reliable.
+- Explicit PaddleOCR MCP failures stop indexing instead of silently falling back to text extraction.
+
+### Tests
+- Current automated baseline: 534 tests.
+
 ## [1.4.0] - 2026-06-06
 
 ### Added

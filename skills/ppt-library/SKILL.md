@@ -4,7 +4,7 @@
 
 | 能力 | 对应命令 |
 |------|---------|
-| 配置引导 | `ppt-lib setup --quick` 或 `ppt-lib setup --mode lmstudio\|openai\|text-extraction` |
+| 配置引导 | `ppt-lib setup --quick` 或 `ppt-lib setup --mode lmstudio\|paddleocr-mcp\|openai\|text-extraction` |
 | 扫描 PPT，去重，创建统一管理视图 | `ppt-lib discover <dir>` |
 | 监听目录增量索引 | `ppt-lib watch <dir>` |
 | 搜索 slide | `ppt-lib search "<query>" [-k N] [--threshold F]` |
@@ -40,6 +40,7 @@
 7. 建库前先用 `sources manifest` 生成资料源清单，再通过 `sources scan --dry-run` 确认扫描范围，避免误扫 Home、Downloads、回收站、缓存目录和依赖包目录。
 8. 需要判断“哪些页值得先看”时，先执行 `enrich-decks --pending --limit 20`，再执行 `insights key-pages --output json`。
 9. 需要批量审查标签时，使用 `insights review-pack --output <jsonl>` 导出只读包；标签回写继续使用 `import-metadata`。
+10. 推荐识别链路是本地 embedding + PaddleOCR MCP：先 `setup --mode lmstudio`，再 `setup --mode paddleocr-mcp`；token 只走环境变量，不写入 `config.yml`。
 
 ### 建库前安全确认
 
@@ -69,6 +70,14 @@ ppt-lib index --from-sources
 ppt-lib status --output json
 ppt-lib search "你的查询"
 ```
+
+如果用户已准备 PaddleOCR MCP，并且资料量较大，可以使用保守文件级并行：
+
+```bash
+ppt-lib index --from-sources --file-workers 2
+```
+
+先从 2 个 worker 开始，确认 AI Studio 或自托管 OCR endpoint 稳定后再提高。
 
 ### 资产经营闭环（公开演示）
 

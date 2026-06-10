@@ -1018,6 +1018,30 @@ def test_cli_setup_lmstudio_writes_non_sensitive_config(monkeypatch, capsys, tmp
     assert "openai_api_key" not in config
 
 
+def test_cli_setup_paddleocr_mcp_writes_non_sensitive_config(monkeypatch, capsys, tmp_path: Path) -> None:
+    class Report:
+        def to_json(self):
+            return {
+                "checks": [{"name": "paddleocr_mcp", "status": "ok"}],
+                "recommended_chain": ["paddleocr_mcp", "text_extraction"],
+                "can_index": True,
+                "can_use_vision": True,
+                "_errors": [],
+            }
+
+    monkeypatch.setattr("ppt_lib.cli.run_diagnostics", lambda settings: Report())
+
+    exit_code = main(["--home-dir", str(tmp_path), "setup", "--mode", "paddleocr-mcp", "--non-interactive"])
+    payload = read_stdout(capsys)
+    config = yaml.safe_load((tmp_path / "config.yml").read_text())
+
+    assert exit_code == 0
+    assert payload["mode"] == "paddleocr_mcp"
+    assert config["vision_provider"] == "paddleocr_mcp"
+    assert config["paddleocr_mcp_pipeline"] == "PaddleOCR-VL-1.6"
+    assert "paddleocr_mcp_access_token" not in config
+
+
 def test_cli_setup_text_output_is_human_readable(monkeypatch, capsys, tmp_path: Path) -> None:
     class Report:
         def to_json(self):
@@ -1042,6 +1066,131 @@ def test_cli_setup_text_output_is_human_readable(monkeypatch, capsys, tmp_path: 
     assert "ppt-lib index --from-sources" in output
     assert "--with-ai-summary" not in output
     assert "_errors" not in output
+
+
+def test_cli_quick_setup_preserves_cloud_vision_choice(monkeypatch, capsys, tmp_path: Path) -> None:
+    class Report:
+        def to_json(self):
+            return {
+                "checks": [],
+                "recommended_chain": ["text_extraction"],
+                "can_index": True,
+                "can_use_vision": False,
+                "_errors": [],
+            }
+
+    monkeypatch.setattr("ppt_lib.cli.run_diagnostics", lambda settings: Report())
+    monkeypatch.setattr(
+        "ppt_lib.cli.detect_environment",
+        lambda settings: {
+            "provider": "lmstudio",
+            "model": "text-embedding-nomic-embed-text-v1.5",
+            "base_url": "http://127.0.0.1:1234/v1",
+            "api_key_available": False,
+            "details": "LM Studio running.",
+        },
+    )
+
+    main([
+        "--home-dir",
+        str(tmp_path),
+        "config",
+        "set",
+        "vision_provider",
+        "cloud",
+    ])
+    capsys.readouterr()
+    main([
+        "--home-dir",
+        str(tmp_path),
+        "config",
+        "set",
+        "vision_max_slides_per_file",
+        "null",
+    ])
+    capsys.readouterr()
+
+    exit_code = main(["--home-dir", str(tmp_path), "setup", "--quick", "--non-interactive", "--output", "json"])
+    payload = read_stdout(capsys)
+
+    assert exit_code == 0
+    assert payload["effective_config"]["vision_provider"] == "cloud"
+    assert payload["effective_config"]["vision_max_slides_per_file"] is None
+
+
+def test_cli_quick_setup_preserves_mmx_vision_choice(monkeypatch, capsys, tmp_path: Path) -> None:
+    class Report:
+        def to_json(self):
+            return {
+                "checks": [],
+                "recommended_chain": ["mmx", "text_extraction"],
+                "can_index": True,
+                "can_use_vision": True,
+                "_errors": [],
+            }
+
+    monkeypatch.setattr("ppt_lib.cli.run_diagnostics", lambda settings: Report())
+    monkeypatch.setattr(
+        "ppt_lib.cli.detect_environment",
+        lambda settings: {
+            "provider": "lmstudio",
+            "model": "text-embedding-nomic-embed-text-v1.5",
+            "base_url": "http://127.0.0.1:1234/v1",
+            "api_key_available": False,
+            "details": "LM Studio running.",
+        },
+    )
+
+    main(["--home-dir", str(tmp_path), "config", "set", "vision_provider", "mmx"])
+    capsys.readouterr()
+    main(["--home-dir", str(tmp_path), "config", "set", "vision_max_slides_per_file", "null"])
+    capsys.readouterr()
+
+    exit_code = main(["--home-dir", str(tmp_path), "setup", "--quick", "--non-interactive", "--output", "json"])
+    payload = read_stdout(capsys)
+
+    assert exit_code == 0
+    assert payload["effective_config"]["vision_provider"] == "mmx"
+    assert payload["effective_config"]["mmx_quota_check"] is True
+    assert payload["effective_config"]["mmx_quota_resume"] is True
+    assert payload["effective_config"]["vision_max_slides_per_file"] is None
+
+
+def test_cli_quick_setup_preserves_paddleocr_mcp_choice(monkeypatch, capsys, tmp_path: Path) -> None:
+    class Report:
+        def to_json(self):
+            return {
+                "checks": [],
+                "recommended_chain": ["paddleocr_mcp", "text_extraction"],
+                "can_index": True,
+                "can_use_vision": True,
+                "_errors": [],
+            }
+
+    monkeypatch.setattr("ppt_lib.cli.run_diagnostics", lambda settings: Report())
+    monkeypatch.setattr(
+        "ppt_lib.cli.detect_environment",
+        lambda settings: {
+            "provider": "lmstudio",
+            "model": "text-embedding-nomic-embed-text-v1.5",
+            "base_url": "http://127.0.0.1:1234/v1",
+            "api_key_available": False,
+            "details": "LM Studio running.",
+        },
+    )
+
+    main(["--home-dir", str(tmp_path), "config", "set", "vision_provider", "paddleocr_mcp"])
+    capsys.readouterr()
+    main(["--home-dir", str(tmp_path), "config", "set", "vision_max_slides_per_file", "null"])
+    capsys.readouterr()
+
+    exit_code = main(["--home-dir", str(tmp_path), "setup", "--quick", "--non-interactive", "--output", "json"])
+    payload = read_stdout(capsys)
+
+    assert exit_code == 0
+    assert payload["effective_config"]["vision_provider"] == "paddleocr_mcp"
+    assert payload["effective_config"]["paddleocr_mcp_pipeline"] == "PaddleOCR-VL-1.6"
+    assert payload["effective_config"]["vision_max_slides_per_file"] is None
 
 
 def test_setup_overview_distinguishes_vision_model_from_indexing_limit() -> None:

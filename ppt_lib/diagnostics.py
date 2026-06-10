@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sqlite3
+import subprocess
 import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass
@@ -81,6 +83,10 @@ def run_diagnostics(settings: Settings) -> DiagnosticReport:
     )
     checks.append(check_api_key("openai_embedding", settings.openai_api_key))
     checks.append(check_api_key("cloud_vision", settings.vision_api_key, required=False))
+    mmx_status, mmx_message, mmx_details = probe_mmx(settings.mmx_command, timeout=float(settings.vision_timeout_seconds))
+    checks.append(DiagnosticCheck("mmx", mmx_status, mmx_message, mmx_details))
+    paddleocr_status, paddleocr_message, paddleocr_details = probe_paddleocr_mcp(settings)
+    checks.append(DiagnosticCheck("paddleocr_mcp", paddleocr_status, paddleocr_message, paddleocr_details))
 
     ollama_status, ollama_message, ollama_details = probe_ollama(settings.ollama_base_url)
     checks.append(DiagnosticCheck("ollama", ollama_status, ollama_message, ollama_details))
@@ -100,15 +106,14 @@ def run_diagnostics(settings: Settings) -> DiagnosticReport:
         for check in checks
         if check.name in {"libreoffice", "sqlite", "screenshots_dir"}
     )
-    provider_can_use_vision = any(
-        check.status == "ok" for check in checks if check.name in {"ollama", "lmstudio", "cloud_vision"}
-    )
-    can_use_vision = provider_can_use_vision and settings.vision_max_slides_per_file != 0
-    recommended_chain = _recommended_chain(checks)
+    chains = _diagnostic_chains(settings, checks)
+    vision_chain = chains["vision"]
+    can_use_vision = vision_chain["status"] == "ok" and settings.vision_max_slides_per_file != 0
+    recommended_chain = _recommended_chain(settings, checks)
     return DiagnosticReport(
         checks=checks,
         recommended_chain=recommended_chain,
-        chains=_diagnostic_chains(settings, checks),
+        chains=chains,
         can_index=can_index,
         can_use_vision=can_use_vision,
     )
@@ -139,6 +144,71 @@ def probe_lmstudio(
         timeout,
         configured_vision_model=vision_model,
     )
+
+
+def probe_mmx(command: str = "mmx", timeout: float = 30.0) -> tuple[CheckStatus, str, dict[str, object]]:
+    if shutil.which(command) is None:
+        return "warning", "mmx command not found", {"command": command}
+    try:
+        auth = subprocess.run(
+            [command, "auth", "status", "--output", "json", "--quiet", "--non-interactive"],
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return "warning", "mmx auth status timed out", {"command": command}
+    if auth.returncode != 0:
+        return _mmx_probe_error(auth.returncode, auth.stderr or auth.stdout, command=command)
+
+    try:
+        quota = subprocess.run(
+            [command, "quota", "show", "--output", "json", "--quiet", "--non-interactive"],
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return "warning", "mmx quota show timed out", {"command": command}
+    if quota.returncode != 0:
+        return _mmx_probe_error(quota.returncode, quota.stderr or quota.stdout, command=command)
+
+    return "ok", "mmx auth and quota probe passed", {"command": command, "auth": _safe_json(auth.stdout), "quota": _safe_json(quota.stdout)}
+
+
+def probe_paddleocr_mcp(settings: Settings) -> tuple[CheckStatus, str, dict[str, object]]:
+    try:
+        import importlib.util
+
+        installed = importlib.util.find_spec("paddleocr_mcp") is not None
+    except Exception:
+        installed = False
+    token_present = bool(settings.paddleocr_mcp_access_token or os.environ.get("PADDLEOCR_MCP_AISTUDIO_ACCESS_TOKEN"))
+    base_url = (
+        settings.paddleocr_mcp_base_url
+        or os.environ.get("PADDLEOCR_MCP_AISTUDIO_BASE_URL")
+        or os.environ.get("PADDLEOCR_MCP_SERVER_URL")
+    )
+    details: dict[str, object] = {
+        "pipeline": settings.paddleocr_mcp_pipeline,
+        "source": settings.paddleocr_mcp_source,
+        "base_url": base_url or "default",
+        "package": "present" if installed else "missing",
+        "access_token": "present" if token_present else "missing",
+    }
+    if settings.vision_provider != "paddleocr_mcp":
+        return "skipped", "PaddleOCR MCP not selected", details
+    if settings.paddleocr_mcp_source == "self_hosted":
+        if not base_url:
+            return "error", "PaddleOCR self-hosted base URL missing", details
+        return "ok", "PaddleOCR self-hosted endpoint configured", details
+    if not installed:
+        return "warning", "paddleocr-mcp package not installed in current Python environment", details
+    if settings.paddleocr_mcp_source == "aistudio" and not token_present:
+        return "error", "PaddleOCR MCP AI Studio access token missing", details
+    return "ok", "PaddleOCR MCP configured", details
 
 
 def probe_embedding_provider(settings: Settings, timeout: float = 10.0) -> tuple[CheckStatus, str, dict[str, object]]:
@@ -278,15 +348,28 @@ def _extract_model_ids(payload: object) -> set[str]:
     return model_ids
 
 
-def _recommended_chain(checks: list[DiagnosticCheck]) -> list[str]:
+def _recommended_chain(settings: Settings, checks: list[DiagnosticCheck]) -> list[str]:
     by_name = {check.name: check for check in checks}
     chain: list[str] = []
-    if by_name.get("ollama") and by_name["ollama"].status == "ok":
+    if settings.vision_provider == "ollama" and by_name.get("ollama") and by_name["ollama"].status == "ok":
         chain.append("ollama")
-    if by_name.get("lmstudio") and by_name["lmstudio"].status == "ok":
+    elif settings.vision_provider == "lmstudio" and by_name.get("lmstudio") and by_name["lmstudio"].status == "ok":
         chain.append("lmstudio")
-    if by_name.get("cloud_vision") and by_name["cloud_vision"].status == "ok":
+    elif settings.vision_provider == "cloud" and by_name.get("cloud_vision") and by_name["cloud_vision"].status == "ok":
         chain.append("cloud")
+    elif settings.vision_provider == "mmx" and by_name.get("mmx") and by_name["mmx"].status == "ok":
+        chain.append("mmx")
+    elif settings.vision_provider == "paddleocr_mcp" and by_name.get("paddleocr_mcp") and by_name["paddleocr_mcp"].status == "ok":
+        chain.append("paddleocr_mcp")
+    elif settings.vision_provider == "auto":
+        if by_name.get("mmx") and by_name["mmx"].status == "ok":
+            chain.append("mmx")
+        if by_name.get("ollama") and by_name["ollama"].status == "ok":
+            chain.append("ollama")
+        if by_name.get("lmstudio") and by_name["lmstudio"].status == "ok":
+            chain.append("lmstudio")
+        if by_name.get("cloud_vision") and by_name["cloud_vision"].status == "ok":
+            chain.append("cloud")
     chain.append("text_extraction")
     return chain
 
@@ -297,6 +380,8 @@ def _diagnostic_chains(settings: Settings, checks: list[DiagnosticCheck]) -> dic
     ollama = by_name.get("ollama")
     openai_embedding = by_name.get("openai_embedding")
     cloud_vision = by_name.get("cloud_vision")
+    mmx = by_name.get("mmx")
+    paddleocr = by_name.get("paddleocr_mcp")
     embedding_probe = by_name.get("embedding_probe")
 
     # Use independent embedding probe when available
@@ -330,12 +415,20 @@ def _diagnostic_chains(settings: Settings, checks: list[DiagnosticCheck]) -> dic
         vision_status = cloud_vision.status if cloud_vision else "skipped"
         vision_message = cloud_vision.message if cloud_vision else "Cloud vision not configured"
         vision_model = settings.cloud_vision_model
+    elif settings.vision_provider == "mmx":
+        vision_status = mmx.status if mmx else "warning"
+        vision_message = mmx.message if mmx else "mmx not checked"
+        vision_model = settings.mmx_vision_model
+    elif settings.vision_provider == "paddleocr_mcp":
+        vision_status = paddleocr.status if paddleocr else "warning"
+        vision_message = paddleocr.message if paddleocr else "PaddleOCR MCP not checked"
+        vision_model = settings.paddleocr_mcp_pipeline
     elif settings.vision_provider == "text_extraction":
         vision_status = "skipped"
         vision_message = "Vision model disabled; text extraction only"
         vision_model = "text_extraction"
     else:
-        local_ok = any(check and check.status == "ok" for check in [ollama, lmstudio])
+        local_ok = any(check and check.status == "ok" for check in [mmx, ollama, lmstudio])
         cloud_ok = cloud_vision is not None and cloud_vision.status == "ok"
         vision_status = "ok" if local_ok or cloud_ok else "warning"
         vision_message = "At least one vision provider available" if vision_status == "ok" else "No vision provider available"
@@ -364,3 +457,26 @@ def _diagnostic_chains(settings: Settings, checks: list[DiagnosticCheck]) -> dic
             "message": "Text extraction fallback is always available after PPTX text extraction.",
         },
     }
+
+
+def _mmx_probe_error(returncode: int, output: str, *, command: str) -> tuple[CheckStatus, str, dict[str, object]]:
+    status: CheckStatus = "error" if returncode in {3, 4} else "warning"
+    label = {
+        2: "usage error",
+        3: "authentication error",
+        4: "quota exceeded",
+        5: "timeout",
+        10: "content filter triggered",
+    }.get(returncode, f"exit code {returncode}")
+    detail = output.strip()
+    message = f"mmx {label}"
+    if detail:
+        message = f"{message}: {detail[:300]}"
+    return status, message, {"command": command, "exit_code": returncode}
+
+
+def _safe_json(raw: str) -> object:
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return raw.strip()

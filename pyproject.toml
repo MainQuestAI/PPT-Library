@@ -1,6 +1,6 @@
 [project]
 name = "ppt-library"
-version = "1.4.0"
+version = "1.4.1"
 description = "Local-first CLI for indexing, searching, reviewing, and reusing PPTX slide assets with AI agents."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -36,6 +36,9 @@ lint = [
 ]
 demo = [
   "python-pptx>=1.0",
+]
+paddleocr = [
+  "paddleocr-mcp>=0.8.2",
 ]
 
 [project.scripts]

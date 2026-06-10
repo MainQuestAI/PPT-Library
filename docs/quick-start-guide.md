@@ -161,6 +161,10 @@ uv sync --extra test --extra lint
 # 使用 LM Studio
 ppt-lib setup --mode lmstudio
 
+# 推荐：本地 embedding + PaddleOCR MCP OCR/视觉识别
+ppt-lib setup --mode lmstudio
+ppt-lib setup --mode paddleocr-mcp
+
 # 使用 OpenAI
 ppt-lib setup --mode openai
 
@@ -176,6 +180,7 @@ ppt-lib config set embedding_dimensions 768
 | Provider | 前提条件 |
 |---|---|
 | **LM Studio** | 启动 LM Studio，加载 embedding 模型（如 `text-embedding-nomic-embed-text-v1.5`），确保服务在 `http://127.0.0.1:1234/v1` 可用 |
+| **PaddleOCR MCP** | 安装 `paddleocr` extra，并通过环境变量提供 AI Studio token；用于 OCR、版式和图表识别 |
 | **OpenAI** | 设置环境变量 `PPT_LIB_OPENAI_API_KEY` |
 | **Ollama** | 安装并启动 Ollama，拉取 embedding 模型（如 `nomic-embed-text`），再按 OpenAI-compatible endpoint 手动配置 |
 
@@ -189,6 +194,12 @@ ppt-lib sources scan --dry-run
 ppt-lib sources scan --apply
 ppt-lib index --from-sources
 ppt-lib search "查询内容" --html
+```
+
+批量使用 PaddleOCR MCP 时，可以先从保守并行开始：
+
+```bash
+ppt-lib index --from-sources --file-workers 2
 ```
 
 ---

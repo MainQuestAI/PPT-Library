@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ppt_lib.diagnostics import probe_lmstudio
+from ppt_lib.diagnostics import probe_lmstudio, probe_mmx
 from ppt_lib.model_compat import (
     ProbeResult,
     extract_chat_text,
@@ -147,7 +147,55 @@ def _is_openai_public_endpoint(api_url: str) -> bool:
 
 
 def _test_chat(settings: Settings) -> dict[str, Any]:
-    # Try cloud first, then LM Studio
+    if settings.vision_provider == "cloud":
+        api_key = settings.vision_api_key or settings.openai_api_key
+        model = getattr(settings, "annotation_model", None) or settings.cloud_vision_model
+        if not api_key:
+            return {
+                "capability": "chat",
+                "provider": "cloud",
+                "model": model,
+                "status": "skipped",
+                "message": "Cloud chat probe skipped; API key missing",
+            }
+        base_url = settings.cloud_vision_base_url.rstrip("/")
+        result = probe_chat(base_url, model, timeout=15.0, api_key=api_key)
+        return {
+            "capability": "chat",
+            "provider": "cloud",
+            "model": model,
+            "status": result.status,
+            "message": result.message,
+            "details": result.details,
+        }
+
+    if settings.vision_provider == "text_extraction":
+        return {
+            "capability": "chat",
+            "provider": "text_extraction",
+            "model": "text_extraction",
+            "status": "skipped",
+            "message": "Chat probe skipped; text extraction only",
+        }
+
+    if settings.vision_provider == "mmx":
+        return {
+            "capability": "chat",
+            "provider": "mmx",
+            "model": settings.mmx_vision_model,
+            "status": "skipped",
+            "message": "Chat probe skipped; mmx vision provider uses `mmx vision describe`",
+        }
+
+    if settings.vision_provider == "paddleocr_mcp":
+        return {
+            "capability": "chat",
+            "provider": "paddleocr_mcp",
+            "model": settings.paddleocr_mcp_pipeline,
+            "status": "skipped",
+            "message": "Chat probe skipped; PaddleOCR MCP provider uses document parsing",
+        }
+
     if settings.openai_api_key:
         base_url = settings.cloud_vision_base_url.rstrip("/")
         model = getattr(settings, "annotation_model", None) or settings.cloud_vision_model
@@ -230,6 +278,17 @@ def _test_vision(settings: Settings) -> dict[str, Any]:
             "details": result.details,
         }
 
+    if provider == "mmx":
+        status, message, details = probe_mmx(settings.mmx_command, timeout=float(settings.vision_timeout_seconds))
+        return {
+            "capability": "vision",
+            "provider": provider,
+            "model": settings.mmx_vision_model,
+            "status": status,
+            "message": message,
+            "details": details,
+        }
+
     if provider == "text_extraction":
         return {
             "capability": "vision", "provider": provider,
@@ -279,7 +338,15 @@ def _test_json_schema(settings: Settings) -> dict[str, Any]:
     import urllib.error
     import urllib.request
 
-    # Only test against LM Studio for now — this is where the incompatibility hits
+    if settings.vision_provider not in {"auto", "lmstudio"}:
+        return {
+            "capability": "json_schema",
+            "provider": settings.vision_provider,
+            "model": _vision_model_label(settings),
+            "status": "skipped",
+            "message": "json_schema probe skipped for non-LM Studio vision provider",
+        }
+
     if not settings.lmstudio_vision_model:
         return {
             "capability": "json_schema", "provider": "none", "model": "?",
@@ -347,6 +414,20 @@ def _test_json_schema(settings: Settings) -> dict[str, Any]:
             "message": f"json_schema not supported: {exc}",
             "details": {"text_fallback_recommended": True},
         }
+
+
+def _vision_model_label(settings: Settings) -> str:
+    if settings.vision_provider == "cloud":
+        return settings.cloud_vision_model
+    if settings.vision_provider == "mmx":
+        return settings.mmx_vision_model
+    if settings.vision_provider == "paddleocr_mcp":
+        return settings.paddleocr_mcp_pipeline
+    if settings.vision_provider == "ollama":
+        return settings.ollama_vision_model
+    if settings.vision_provider == "text_extraction":
+        return "text_extraction"
+    return "?"
 
 
 def _update_cache(settings: Settings, results: list[dict[str, Any]]) -> None:

@@ -358,6 +358,43 @@ def test_cli_index_from_sources_writes_progress_and_status_reports_it(
     assert status_payload["sources_health"]["index_progress"]["status"] == "completed"
 
 
+def test_cli_index_from_sources_supports_parallel_file_workers(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    library = tmp_path / "library"
+    library.mkdir()
+    first = library / "first.pptx"
+    second = library / "second.pptx"
+    first.write_text("pptx", encoding="utf-8")
+    second.write_text("pptx", encoding="utf-8")
+    manifest = tmp_path / "sources-manifest.json"
+    manifest.write_text(json.dumps({"sources": {"library": [str(library)]}}, ensure_ascii=False), encoding="utf-8")
+    indexed_paths: list[Path] = []
+
+    def fake_index_file(path: Path, settings, full: bool = False) -> IndexResult:
+        indexed_paths.append(path)
+        return IndexResult(path, "indexed", 1, [], [])
+
+    monkeypatch.setattr("ppt_lib.cli.index_file", fake_index_file)
+    assert main(["--home-dir", str(tmp_path), "init", "--manifest", str(manifest), "--non-interactive", "--output", "json"]) == 0
+    _read_json(capsys)
+    assert main(["--home-dir", str(tmp_path), "sources", "scan", "--apply", "--output", "json"]) == 0
+    _read_json(capsys)
+
+    index_result = main(["--home-dir", str(tmp_path), "index", "--from-sources", "--file-workers", "2"])
+    payload = _read_json(capsys)
+    progress = json.loads((tmp_path / "sources" / "index-progress.json").read_text(encoding="utf-8"))
+
+    assert index_result == 0
+    assert payload["pptx_count"] == 2
+    assert sorted(path.name for path in indexed_paths) == ["first.pptx", "second.pptx"]
+    assert progress["status"] == "completed"
+    assert progress["processed_pptx"] == 2
+    assert progress["file_workers"] == 2
+
+
 def test_cli_index_from_sources_progress_records_failed_count(
     tmp_path: Path,
     capsys,
