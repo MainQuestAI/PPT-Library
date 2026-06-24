@@ -1,0 +1,43 @@
+{
+  "contract": "ppt_library.capabilities.v1",
+  "producer_version": "1.5.0",
+  "db_schema_version": 5,
+  "modes": [
+    "local"
+  ],
+  "features": {
+    "index.resume": true,
+    "selection.deck_master_v1": true,
+    "search.hybrid_v2": false,
+    "workbench": false,
+    "server_mode": false
+  },
+  "contracts": [
+    "deck_master_ppt_library_selection.v1",
+    "ppt_library.asset_identity.v1"
+  ],
+  "providers": {
+    "embedding": [
+      {
+        "name": "fake",
+        "available": true
+      }
+    ],
+    "vision": [
+      {
+        "name": "text_extraction",
+        "available": true
+      }
+    ],
+    "rerank": []
+  },
+  "storage": {
+    "metadata": [
+      "sqlite"
+    ],
+    "vector": [
+      "sqlite_scan"
+    ]
+  },
+  "warnings": []
+}

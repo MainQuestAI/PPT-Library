@@ -159,6 +159,8 @@ def probe_mmx(command: str = "mmx", timeout: float = 30.0) -> tuple[CheckStatus,
         )
     except subprocess.TimeoutExpired:
         return "warning", "mmx auth status timed out", {"command": command}
+    except FileNotFoundError:
+        return "warning", "mmx command not found", {"command": command}
     if auth.returncode != 0:
         return _mmx_probe_error(auth.returncode, auth.stderr or auth.stdout, command=command)
 
@@ -172,6 +174,8 @@ def probe_mmx(command: str = "mmx", timeout: float = 30.0) -> tuple[CheckStatus,
         )
     except subprocess.TimeoutExpired:
         return "warning", "mmx quota show timed out", {"command": command}
+    except FileNotFoundError:
+        return "warning", "mmx command not found", {"command": command}
     if quota.returncode != 0:
         return _mmx_probe_error(quota.returncode, quota.stderr or quota.stdout, command=command)
 

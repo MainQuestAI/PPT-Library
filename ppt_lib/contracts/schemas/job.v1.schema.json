@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ppt-library.local/contracts/job.v1.schema.json",
+  "title": "PPT Library Job v1",
+  "type": "object",
+  "required": [
+    "contract",
+    "job_id",
+    "job_type",
+    "idempotency_key",
+    "status",
+    "current_stage",
+    "progress"
+  ],
+  "properties": {
+    "contract": {
+      "const": "ppt_library.job.v1"
+    },
+    "job_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "job_type": {
+      "type": "string",
+      "minLength": 1
+    },
+    "idempotency_key": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "enum": [
+        "queued",
+        "running",
+        "paused",
+        "cancelling",
+        "cancelled",
+        "completed",
+        "completed_with_warnings",
+        "failed"
+      ]
+    },
+    "current_stage": {
+      "enum": [
+        "discover",
+        "extract",
+        "render",
+        "recognize",
+        "embed",
+        "stage",
+        "commit",
+        "govern",
+        "finalize"
+      ]
+    },
+    "progress": {
+      "type": "object",
+      "required": [
+        "completed_units",
+        "total_units"
+      ],
+      "properties": {
+        "completed_units": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "total_units": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failed_units": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "attempt": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "checkpoint": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "errors": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "created_at": {
+      "type": "string"
+    },
+    "updated_at": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": true
+}

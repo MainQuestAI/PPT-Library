@@ -1,0 +1,22 @@
+{
+  "contract": "ppt_library.asset_identity.v1",
+  "canonical_asset_id": "asset_01JTESTASSET00000000000000",
+  "slide_revision_id": "srev_4f26d6f5d2c0",
+  "deck_asset_id": "deck_01JTESTDECK000000000000000",
+  "deck_revision_id": "drev_9d350f5dd20a",
+  "identity_status": "resolved",
+  "source_locator": {
+    "provider": "local",
+    "opaque_id": "src_01JTEST",
+    "display_path": "/example/demo-deck.pptx",
+    "revision": "sha256:demo"
+  },
+  "fingerprints": {
+    "algorithm_version": "slide-fingerprint-v1",
+    "content_hash": "sha256:content",
+    "text_hash": "sha256:text",
+    "visual_hash": "phash:001122",
+    "layout_hash": "sha256:layout"
+  },
+  "legacy_slide_id": 42
+}

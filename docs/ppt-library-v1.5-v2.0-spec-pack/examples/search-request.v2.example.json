@@ -1,0 +1,23 @@
+{
+  "contract": "ppt_library.search_request.v2",
+  "request_id": "req_01JTEST",
+  "run_id": "run_01JTEST",
+  "query": "汽车行业 AI 搜索平台架构",
+  "top_k": 10,
+  "search_profile": "deck_master",
+  "filters": {
+    "industry": [
+      "automotive"
+    ],
+    "page_role": [
+      "architecture"
+    ],
+    "include_versions": false
+  },
+  "context": {
+    "scenario": "proposal",
+    "audience": "executive"
+  },
+  "explain": true,
+  "idempotency_key": "run_01JTEST:page_01:slot_main"
+}

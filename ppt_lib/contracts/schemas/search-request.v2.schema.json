@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ppt-library.local/contracts/search-request.v2.schema.json",
+  "title": "PPT Library Search Request v2",
+  "type": "object",
+  "required": [
+    "contract",
+    "request_id",
+    "query"
+  ],
+  "properties": {
+    "contract": {
+      "const": "ppt_library.search_request.v2"
+    },
+    "request_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "run_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "query": {
+      "type": "string",
+      "minLength": 1
+    },
+    "top_k": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100
+    },
+    "search_profile": {
+      "type": "string"
+    },
+    "filters": {
+      "type": "object"
+    },
+    "context": {
+      "type": "object"
+    },
+    "explain": {
+      "type": "boolean"
+    },
+    "idempotency_key": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "additionalProperties": false
+}

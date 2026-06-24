@@ -1,0 +1,187 @@
+{
+  "spec_pack": "ppt-library-v1.5-v2.0",
+  "generated_at": "2026-06-23T00:00:00+08:00",
+  "baseline": {
+    "repository": "MainQuestAI/PPT-Library",
+    "public_version_observed": "1.4.1",
+    "note": "Implementation must verify current origin/main and actual test/schema state with Codex."
+  },
+  "file_count": 35,
+  "files": [
+    {
+      "path": "00-master-program-spec.md",
+      "size_bytes": 10241,
+      "sha256": "58f7deffc4ef5c65b3ff801a85008827fd86d3f3bb6e602927ef443c939b7a9d"
+    },
+    {
+      "path": "01-product-boundaries-and-target-architecture.md",
+      "size_bytes": 10161,
+      "sha256": "50cc122c8f68e4ca64b16403dad6fd18ca0cde9155455e61ed275dcf6b77ca0a"
+    },
+    {
+      "path": "02-cross-version-contracts-and-compatibility.md",
+      "size_bytes": 7957,
+      "sha256": "91f20594243e1b8d6aecae7268dbe237a249e7754d3931b03255f382ddc1a449"
+    },
+    {
+      "path": "03-v1.5-production-core-and-contract-closure.md",
+      "size_bytes": 14649,
+      "sha256": "5d40309f8c7c9eca90dc3ae8dba59b4c14314c196269229bfd771cef40adfc86"
+    },
+    {
+      "path": "04-v1.6-search-quality-and-benchmark.md",
+      "size_bytes": 11796,
+      "sha256": "7aeb0502fd5c1f97da5569e31a91912bbe51e9d8480b3adbae51ccbcc60849d9"
+    },
+    {
+      "path": "05-v1.7-asset-intelligence-and-lineage.md",
+      "size_bytes": 13573,
+      "sha256": "7ff412cfaf0f59588b8d4ac0ce17be494cf8b032fbb66dea640114fbeea09ea1"
+    },
+    {
+      "path": "06-v1.8-local-review-workbench.md",
+      "size_bytes": 10925,
+      "sha256": "36bc0e32e0344083b12359c9ee76f49b3c7e60c3d398cc7014dca089b8ccf0bf"
+    },
+    {
+      "path": "07-v1.9-team-preview-and-operations.md",
+      "size_bytes": 12470,
+      "sha256": "b516f63deabaffdf508f88334677476bdb4da63d16b0d29e819f35bc0d718ed4"
+    },
+    {
+      "path": "08-v2.0-team-enterprise-ga.md",
+      "size_bytes": 12914,
+      "sha256": "987c045e0d98cb7ed2c33f03e159a8c182d870781392d03ce5a0c131ffe0a43c"
+    },
+    {
+      "path": "09-data-schema-migrations-and-identity.md",
+      "size_bytes": 10519,
+      "sha256": "642b6b91e8c8485336bc9b02912ee201c4b492b9f6be71cbdef3e74c0a8c3327"
+    },
+    {
+      "path": "10-benchmark-quality-gates-and-test-matrix.md",
+      "size_bytes": 8520,
+      "sha256": "09118f8782931a619620f08a5eb98b1b7ae20ef8021f64dea54221dc8da257d1"
+    },
+    {
+      "path": "11-security-privacy-and-governance.md",
+      "size_bytes": 7052,
+      "sha256": "5cfe8fc738f662134b4f540bd97bb4ae4c291bab6890aa8358baea039c79af82"
+    },
+    {
+      "path": "12-release-rollout-and-backward-compatibility.md",
+      "size_bytes": 5667,
+      "sha256": "0aa1378bd14760d6196ee2d1d305712db7479e7c49952c0868c882b786aecb2a"
+    },
+    {
+      "path": "13-agent-execution-task-pack.md",
+      "size_bytes": 19951,
+      "sha256": "c53d31502d4f1a62423c4e5a1b53f3be135a7ffc8cd2ba06fbe493c1b860c263"
+    },
+    {
+      "path": "14-risk-register-and-decision-log.md",
+      "size_bytes": 4870,
+      "sha256": "0b21ac23e34542f6811e17c3ddcf00ae9a32567ca468067c1422cf8d216d101d"
+    },
+    {
+      "path": "15-definition-of-done-and-acceptance-checklists.md",
+      "size_bytes": 4146,
+      "sha256": "8acc27acb0db9076228d2a7e2fed5975b504850892d1536b39342524e684beec"
+    },
+    {
+      "path": "CODEX-START-HERE.md",
+      "size_bytes": 1460,
+      "sha256": "3eec94edbe3c7d65953f01a1851c9deda54362f1fc66bd8a14e2a673ec68d83b"
+    },
+    {
+      "path": "README.md",
+      "size_bytes": 5631,
+      "sha256": "8cbf5b4ba83b53e5129425b25c81547a31dcf3d1da52867e82cd2700cdc3e24e"
+    },
+    {
+      "path": "contracts/README.md",
+      "size_bytes": 439,
+      "sha256": "c37269e85d6ef2580295318e6b80b3f22c59b8a10617f400a1244cbdc26c3c60"
+    },
+    {
+      "path": "contracts/asset-identity.v1.schema.json",
+      "size_bytes": 2289,
+      "sha256": "3317609267c55a7ff2cf1b080649a14ee7f4b5acd689fcaf9b9109a9f45d581f"
+    },
+    {
+      "path": "contracts/capabilities.v1.schema.json",
+      "size_bytes": 1580,
+      "sha256": "a2421f2c52215ff45936e39a1afe3d5d52fc523b4b8eb797e58718b27185b940"
+    },
+    {
+      "path": "contracts/deck-master-selection.v1.schema.json",
+      "size_bytes": 1995,
+      "sha256": "c0242c05ab240d2bb650bb07e55e0ffe54bcbf2ef20b8bb4b0737d0af0bc7204"
+    },
+    {
+      "path": "contracts/feedback-event.v1.schema.json",
+      "size_bytes": 1891,
+      "sha256": "0b20fa9f5066988a7e38331868d16b61d3cb0e3b636da234ce5b4734ee18405f"
+    },
+    {
+      "path": "contracts/job.v1.schema.json",
+      "size_bytes": 1964,
+      "sha256": "364e0a50a10d7412e3980354f47d40651a2fbbbb2e7cd715943247e2665a1d99"
+    },
+    {
+      "path": "contracts/search-request.v2.schema.json",
+      "size_bytes": 992,
+      "sha256": "41e48382ff1a6da25c1bf5ce7ad919f3522eeaad8769348f61ec2511a1e94f10"
+    },
+    {
+      "path": "contracts/search-response.v2.schema.json",
+      "size_bytes": 3393,
+      "sha256": "110a136637d01672cfc4df4cdb1e23a95d103ffa6734459562de07f6d8ea2da7"
+    },
+    {
+      "path": "examples/README.md",
+      "size_bytes": 309,
+      "sha256": "9bab89105042c93058ab440485357b16a02757b2d7d64c8b5ddb50ec1cee12d8"
+    },
+    {
+      "path": "examples/asset-identity.v1.example.json",
+      "size_bytes": 684,
+      "sha256": "b11a39317beb09314037d759c67e7c3219280efb6f72f5f5208da6af7cb32fcd"
+    },
+    {
+      "path": "examples/capabilities.v1.example.json",
+      "size_bytes": 753,
+      "sha256": "b129f743f1af4e8a0e24bb48e99612e9d060631120eebde2330b1dd867cfa8ee"
+    },
+    {
+      "path": "examples/deck-master-selection.v1.example.json",
+      "size_bytes": 871,
+      "sha256": "b48c6c96ff59fd32bcb8faabc6fe5b33eb033f2a5c339bb155db08ab3979006a"
+    },
+    {
+      "path": "examples/feedback-event.v1.example.json",
+      "size_bytes": 603,
+      "sha256": "3441e3bfab2cda7bc2335d965675eb3cb7cd91df2c53016ac72aa828eae4df8d"
+    },
+    {
+      "path": "examples/job.v1.example.json",
+      "size_bytes": 470,
+      "sha256": "2f79df149d5624b106764273f884e5b0fc8e28a63336c87386abba91c397bae0"
+    },
+    {
+      "path": "examples/search-request.v2.example.json",
+      "size_bytes": 497,
+      "sha256": "84e81036a9d6052bfdc379d15de8f41e4e62936fe4527ae6354d1db050cf29b9"
+    },
+    {
+      "path": "examples/search-response.v2.example.json",
+      "size_bytes": 1202,
+      "sha256": "f2d77747b38374cfc67333ff70d7a5ea8981af5646e70a058cd10635e144eebc"
+    },
+    {
+      "path": "ppt-library-v1.5-v2.0-complete-spec.md",
+      "size_bytes": 173796,
+      "sha256": "7df57ea44dac75913126d43f171c3b7935c801823c6e0d6b729ebb00a323ca58"
+    }
+  ]
+}

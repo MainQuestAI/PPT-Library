@@ -9,7 +9,7 @@ from typing import Literal, cast
 
 import numpy as np
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 class DatabaseError(RuntimeError):
@@ -357,7 +357,98 @@ def init_db(
     )
     _ensure_schema_version(conn, backups_dir=backups_dir)
     _ensure_extended_indexes(conn)
+    _ensure_v5_tables(conn)
     conn.commit()
+
+
+def _ensure_v5_tables(conn: sqlite3.Connection) -> None:
+    """Create schema v5 tables (identity, jobs, contracts, migration journal).
+
+    Safe to call on existing v4 databases — CREATE TABLE IF NOT EXISTS is a
+    no-op when the table already exists.
+    """
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS asset_identity_map (
+            canonical_asset_id TEXT NOT NULL,
+            slide_revision_id TEXT NOT NULL,
+            legacy_slide_id INTEGER,
+            identity_status TEXT NOT NULL DEFAULT 'legacy_unresolved',
+            algorithm_version TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (canonical_asset_id, slide_revision_id)
+        );
+        CREATE TABLE IF NOT EXISTS jobs (
+            job_id TEXT PRIMARY KEY,
+            job_type TEXT NOT NULL,
+            idempotency_key TEXT UNIQUE,
+            source_id TEXT,
+            source_locator TEXT,
+            source_content_hash TEXT,
+            pipeline_config_hash TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'created',
+            current_stage TEXT,
+            total_units INTEGER DEFAULT 0,
+            completed_units INTEGER DEFAULT 0,
+            failed_units INTEGER DEFAULT 0,
+            attempt INTEGER DEFAULT 1,
+            cancel_requested INTEGER DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT,
+            started_at TEXT,
+            finished_at TEXT,
+            error_json TEXT,
+            warning_json TEXT
+        );
+        CREATE TABLE IF NOT EXISTS job_stages (
+            stage_id TEXT PRIMARY KEY,
+            job_id TEXT NOT NULL,
+            stage_name TEXT NOT NULL,
+            status TEXT NOT NULL,
+            started_at TEXT,
+            finished_at TEXT,
+            artifact_path TEXT,
+            error_json TEXT
+        );
+        CREATE TABLE IF NOT EXISTS job_events (
+            event_id TEXT PRIMARY KEY,
+            job_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            occurred_at TEXT NOT NULL,
+            payload_json TEXT
+        );
+        CREATE TABLE IF NOT EXISTS job_checkpoints (
+            checkpoint_id TEXT PRIMARY KEY,
+            job_id TEXT NOT NULL,
+            stage_name TEXT NOT NULL,
+            checkpoint_data_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS staged_assets (
+            staged_id TEXT PRIMARY KEY,
+            job_id TEXT NOT NULL,
+            slide_revision_id TEXT,
+            asset_data_json TEXT NOT NULL,
+            committed INTEGER DEFAULT 0,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS migration_journal (
+            migration_id TEXT PRIMARY KEY,
+            from_version INTEGER NOT NULL,
+            to_version INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            finished_at TEXT,
+            backup_path TEXT,
+            error_json TEXT,
+            row_counts_json TEXT,
+            verify_result_json TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_identity_revision ON asset_identity_map(slide_revision_id);
+        CREATE INDEX IF NOT EXISTS idx_identity_canonical ON asset_identity_map(canonical_asset_id);
+        CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status, updated_at);
+        CREATE INDEX IF NOT EXISTS idx_job_events_job ON job_events(job_id, occurred_at);
+    """)
 
 
 def backup_db(conn: sqlite3.Connection, backups_dir: Path) -> Path:

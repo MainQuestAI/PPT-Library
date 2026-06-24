@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ppt-library.local/contracts/capabilities.v1.schema.json",
+  "title": "PPT Library Capabilities v1",
+  "type": "object",
+  "required": [
+    "contract",
+    "producer_version",
+    "modes",
+    "features",
+    "contracts",
+    "providers",
+    "storage"
+  ],
+  "properties": {
+    "contract": {
+      "const": "ppt_library.capabilities.v1"
+    },
+    "producer_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "db_schema_version": {
+      "type": [
+        "integer",
+        "string"
+      ]
+    },
+    "modes": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "local",
+          "server",
+          "embedded"
+        ]
+      },
+      "uniqueItems": true
+    },
+    "features": {
+      "type": "object",
+      "additionalProperties": {
+        "type": [
+          "boolean",
+          "string",
+          "number",
+          "null"
+        ]
+      }
+    },
+    "contracts": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true
+    },
+    "providers": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "type": "object"
+        }
+      }
+    },
+    "storage": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    }
+  },
+  "additionalProperties": true
+}

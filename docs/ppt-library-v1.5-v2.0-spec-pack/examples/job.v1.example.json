@@ -1,0 +1,21 @@
+{
+  "contract": "ppt_library.job.v1",
+  "job_id": "job_01JTEST",
+  "job_type": "index_source",
+  "idempotency_key": "idx:src:hash:config",
+  "status": "running",
+  "current_stage": "recognize",
+  "progress": {
+    "completed_units": 8,
+    "total_units": 20,
+    "failed_units": 0
+  },
+  "attempt": 1,
+  "checkpoint": {
+    "last_completed_slide": 7
+  },
+  "errors": [],
+  "warnings": [],
+  "created_at": "2026-06-23T00:00:00Z",
+  "updated_at": "2026-06-23T00:01:00Z"
+}

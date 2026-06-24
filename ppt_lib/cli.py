@@ -484,6 +484,34 @@ def build_parser() -> argparse.ArgumentParser:
     assemble_spike_parser = subparsers.add_parser("spike-assemble")
     assemble_spike_parser.add_argument("--manifest", required=True)
     assemble_spike_parser.add_argument("--out-dir")
+
+    # --- 1.5-B: Capabilities & Contract Registry ---
+    capabilities_parser = subparsers.add_parser("capabilities", help="report runtime capabilities")
+    capabilities_parser.add_argument("--output", choices=["auto", "text", "json"], default="auto")
+    capabilities_parser.add_argument("--probe", action="store_true", help="send health probes to configured providers")
+
+    contract_parser = subparsers.add_parser("contract", help="inspect and validate machine contracts")
+    contract_subparsers = contract_parser.add_subparsers(dest="contract_command", required=True, parser_class=JsonArgumentParser)
+    contract_list_parser = contract_subparsers.add_parser("list", help="list all registered contracts")
+    contract_list_parser.add_argument("--output", choices=["auto", "text", "json"], default="auto")
+    contract_show_parser = contract_subparsers.add_parser("show", help="show contract schema")
+    contract_show_parser.add_argument("name")
+    contract_show_parser.add_argument("--output", choices=["auto", "text", "json"], default="auto")
+    contract_validate_parser = contract_subparsers.add_parser("validate", help="validate data against a contract")
+    contract_validate_parser.add_argument("name")
+    contract_validate_parser.add_argument("--data", required=True, help="JSON file or inline JSON string to validate")
+    contract_validate_parser.add_argument("--strict", action="store_true", default=True, help="reject additional properties")
+    contract_validate_parser.add_argument("--output", choices=["auto", "text", "json"], default="auto")
+
+    # --- v1.8: Workbench ---
+    workbench_parser = subparsers.add_parser("workbench", help="manage the local review workbench server")
+    workbench_subparsers = workbench_parser.add_subparsers(dest="workbench_command", required=True, parser_class=JsonArgumentParser)
+    workbench_start_parser = workbench_subparsers.add_parser("start", help="start the workbench API server")
+    workbench_start_parser.add_argument("--host", default="127.0.0.1")
+    workbench_start_parser.add_argument("--port", type=int, default=8899)
+    workbench_status_parser = workbench_subparsers.add_parser("status", help="check workbench server status")
+    workbench_status_parser.add_argument("--output", choices=["auto", "text", "json"], default="auto")
+
     return parser
 
 
@@ -1231,6 +1259,75 @@ def _dispatch(args: argparse.Namespace, settings) -> tuple[dict[str, object], li
         except AssembleSpikeManifestError as exc:
             return {"report": None}, [ErrorRecord("ASSEMBLE_SPIKE_MANIFEST_ERROR", str(exc), "assemble_spike")]
         return {"report": _dataclass_to_json(assemble_spike_report)}, []
+
+    if args.command == "capabilities":
+        from ppt_lib.services.capability_service import detect_capabilities
+
+        capability_report = detect_capabilities(settings, probe_providers=args.probe)
+        return capability_report.to_json(), []
+
+    if args.command == "contract":
+        from ppt_lib.contracts import ContractNotFoundError, get_registry
+
+        registry = get_registry()
+        if args.contract_command == "list":
+            contracts = registry.list_contracts()
+            return {"contracts": [c.to_json() for c in contracts]}, []
+        if args.contract_command == "show":
+            try:
+                defn = registry.get(args.name)
+            except ContractNotFoundError:
+                return {}, [ErrorRecord("CONTRACT_NOT_FOUND", f"Unknown contract: {args.name}", "contract")]
+            return {"contract": defn.to_json(), "schema": defn.schema}, []
+        if args.contract_command == "validate":
+            try:
+                defn = registry.get(args.name)
+            except ContractNotFoundError:
+                return {}, [ErrorRecord("CONTRACT_NOT_FOUND", f"Unknown contract: {args.name}", "contract")]
+            # Parse data from file or inline JSON
+            data_input = args.data
+            if Path(data_input).is_file():
+                with open(data_input) as f:
+                    data = json.load(f)
+            else:
+                try:
+                    data = json.loads(data_input)
+                except json.JSONDecodeError:
+                    return {}, [ErrorRecord("INVALID_INPUT", "Cannot parse --data as JSON file or inline JSON", "contract")]
+            validation_errors = registry.validate(args.name, data, strict=args.strict)
+            if validation_errors:
+                return {
+                    "valid": False,
+                    "contract": args.name,
+                    "errors": [e.to_json() for e in validation_errors],
+                }, []
+            return {"valid": True, "contract": args.name, "errors": []}, []
+
+    if args.command == "workbench":
+        import urllib.request
+        if args.workbench_command == "start":
+            try:
+                from ppt_lib.api_server import APIConfig, create_api_app
+            except ImportError as exc:
+                return {}, [ErrorRecord("WORKBENCH_UNAVAILABLE", str(exc), "workbench")]
+            config = APIConfig(host=args.host, port=args.port, db_path=settings.db_path)
+            app = create_api_app(config)
+            try:
+                import uvicorn
+            except ImportError as exc:
+                return {}, [ErrorRecord("WORKBENCH_UNAVAILABLE", f"uvicorn not installed: {exc}", "workbench")]
+            print(f"Starting PPT Library Workbench on http://{args.host}:{args.port}")
+            print("Press Ctrl+C to stop.")
+            uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+            return {}, []
+        if args.workbench_command == "status":
+            url = "http://127.0.0.1:8899/api/v1/health"
+            try:
+                with urllib.request.urlopen(url, timeout=2) as resp:
+                    data = json.loads(resp.read())
+                    return {"running": True, "health": data}, []
+            except Exception:
+                return {"running": False}, []
     raise ValueError(f"Unknown command: {args.command}")
 
 
@@ -1542,6 +1639,10 @@ def _human_output(command: str, payload: dict[str, object], errors: list[ErrorRe
         text = _human_versions(payload)
     elif command == "insights":
         text = _human_insights(payload)
+    elif command == "capabilities":
+        text = _human_capabilities(payload)
+    elif command == "contract":
+        text = _human_contract(payload)
     if errors and text:
         return f"{text}\n\n{_human_errors(command, errors)}"
     if errors:
@@ -2075,6 +2176,74 @@ def _human_insights(payload: dict[str, object]) -> str:
         lines.append(f"- output: {result.get('output_path', '-')}")
         lines.append(f"- format: {result.get('output_format', '-')}")
     return "\n".join(lines)
+
+
+def _human_capabilities(payload: dict[str, object]) -> str:
+    lines = ["PPT Library Capabilities"]
+    lines.append(f"- contract: {payload.get('contract', '-')}")
+    lines.append(f"- producer_version: {payload.get('producer_version', '-')}")
+    lines.append(f"- db_schema_version: {payload.get('db_schema_version', '-')}")
+    modes = payload.get("modes", [])
+    if isinstance(modes, list):
+        lines.append(f"- modes: {', '.join(modes) if modes else '-'}")
+    else:
+        lines.append("- modes: -")
+    features = payload.get("features", {})
+    if isinstance(features, dict):
+        enabled = [k for k, v in features.items() if v]
+        disabled = [k for k, v in features.items() if not v]
+        lines.append(f"- features enabled: {', '.join(enabled) if enabled else 'none'}")
+        if disabled:
+            lines.append(f"- features disabled: {', '.join(disabled)}")
+    contracts = payload.get("contracts", [])
+    if isinstance(contracts, list):
+        lines.append(f"- contracts: {', '.join(contracts) if contracts else 'none'}")
+    else:
+        lines.append("- contracts: none")
+    providers = payload.get("providers", {})
+    if isinstance(providers, dict):
+        for category, provider_list in providers.items():
+            if isinstance(provider_list, list):
+                available = [p.get("name", "?") for p in provider_list if isinstance(p, dict) and p.get("available")]
+                lines.append(f"- {category} providers: {', '.join(available) if available else 'none available'}")
+    warnings = payload.get("warnings", [])
+    if isinstance(warnings, list) and warnings:
+        for w in warnings:
+            if isinstance(w, dict):
+                lines.append(f"  ! [{w.get('code', '?')}] {w.get('message', '')}")
+    return "\n".join(lines)
+
+
+def _human_contract(payload: dict[str, object]) -> str:
+    if "contracts" in payload:
+        contracts = payload.get("contracts", [])
+        lines = ["PPT Library Contracts"]
+        if isinstance(contracts, list):
+            for c in contracts:
+                if isinstance(c, dict):
+                    lines.append(f"- {c.get('name', '?')}: {c.get('title', '')}")
+        return "\n".join(lines)
+    if "contract" in payload and "schema" in payload:
+        c = payload.get("contract", {})
+        lines = [f"Contract: {c.get('name', '?') if isinstance(c, dict) else c}"]
+        if isinstance(c, dict):
+            lines.append(f"- title: {c.get('title', '-')}")
+            req = c.get("required_fields", [])
+            lines.append(f"- required: {', '.join(req) if isinstance(req, list) else str(req)}")
+        return "\n".join(lines)
+    if "valid" in payload:
+        valid = payload.get("valid", False)
+        contract_name = payload.get("contract", "?")
+        if valid:
+            return f"Contract '{contract_name}': VALID"
+        errors = payload.get("errors", [])
+        lines = [f"Contract '{contract_name}': INVALID"]
+        if isinstance(errors, list):
+            for e in errors:
+                if isinstance(e, dict):
+                    lines.append(f"  - [{e.get('code', '?')}] {e.get('message', '')}")
+        return "\n".join(lines)
+    return "PPT Library Contract"
 
 
 def _human_assets(payload: dict[str, object]) -> str:

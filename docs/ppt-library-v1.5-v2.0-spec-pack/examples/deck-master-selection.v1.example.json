@@ -1,0 +1,30 @@
+{
+  "schema_version": "deck_master_ppt_library_selection.v1",
+  "run_id": "run_01JTEST",
+  "source": "ppt-library",
+  "producer_version": "1.5.0",
+  "selections": [
+    {
+      "beat_id": "beat_01",
+      "page_task_id": "page_01",
+      "slot_id": "main",
+      "query_trace_id": "qry_01JTEST",
+      "role": "architecture",
+      "candidates": [
+        {
+          "candidate_id": "cand_01",
+          "canonical_asset_id": "asset_01JTESTASSET00000000000000",
+          "slide_revision_id": "srev_4f26d6f5d2c0",
+          "title": "AI 搜索平台总体架构",
+          "source_file": "/example/demo-deck.pptx",
+          "page_number": 12,
+          "screenshot_path": "/example/preview.png",
+          "confidence": 0.87,
+          "score": 0.87,
+          "candidate_origin": "ppt_library",
+          "library_source": "ppt_library"
+        }
+      ]
+    }
+  ]
+}

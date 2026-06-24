@@ -1,6 +1,6 @@
 [project]
 name = "ppt-library"
-version = "1.4.1"
+version = "2.0.0"
 description = "Local-first CLI for indexing, searching, reviewing, and reusing PPTX slide assets with AI agents."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -40,6 +40,11 @@ demo = [
 paddleocr = [
   "paddleocr-mcp>=0.8.2",
 ]
+workbench = [
+  "fastapi>=0.110",
+  "uvicorn>=0.29",
+  "httpx2>=0.6",
+]
 
 [project.scripts]
 ppt-lib = "ppt_lib.cli:main"
@@ -67,6 +72,10 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# FastAPI Depends() in argument defaults is the framework's standard pattern
+"ppt_lib/api_server.py" = ["B008"]
 
 [tool.mypy]
 python_version = "3.12"

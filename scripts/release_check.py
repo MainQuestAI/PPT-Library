@@ -49,7 +49,7 @@ PRIVATE_PATTERNS = [
     "爱" + "帛",
     "达" + "能",
 ]
-EXPECTED_TEST_BASELINE = "534"
+EXPECTED_TEST_BASELINE = "1083"
 
 
 @dataclass
@@ -83,7 +83,7 @@ def main() -> int:
         "results": [item.__dict__ for item in results],
     }
     if args.output == "json":
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
     else:
         print_text_report(payload)
     return 0 if payload["status"] == "pass" else 1
@@ -178,8 +178,8 @@ def check_release_metadata(root: Path) -> CheckResult:
     changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
     license_text = (root / "LICENSE").read_text(encoding="utf-8") if (root / "LICENSE").exists() else ""
     missing: list[str] = []
-    if version != "1.4.1":
-        missing.append("pyproject version must be 1.4.1")
+    if version != "2.0.0":
+        missing.append("pyproject version must be 2.0.0")
     if version_file != version:
         missing.append("VERSION must match pyproject version")
     if EXPECTED_TEST_BASELINE not in readme:
@@ -399,7 +399,9 @@ def run(
             env=env,
         )
     except subprocess.TimeoutExpired as exc:
-        return subprocess.CompletedProcess(command, 124, exc.stdout or "", exc.stderr or "timed out")
+        out = exc.stdout if isinstance(exc.stdout, str) else (exc.stdout.decode("utf-8", "replace") if exc.stdout else "")
+        err = exc.stderr if isinstance(exc.stderr, str) else (exc.stderr.decode("utf-8", "replace") if exc.stderr else "timed out")
+        return subprocess.CompletedProcess(command, 124, out, err)
     if check and result.returncode != 0:
         raise RuntimeError(f"{' '.join(command)} failed: {result.stderr[-1000:] or result.stdout[-1000:]}")
     return result

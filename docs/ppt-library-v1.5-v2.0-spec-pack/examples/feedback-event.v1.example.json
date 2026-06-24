@@ -1,0 +1,23 @@
+{
+  "contract": "ppt_library.feedback_event.v1",
+  "event_id": "evt_01JTEST",
+  "idempotency_key": "deck-master:run_01:page_01:cand_01:selected",
+  "event_type": "candidate.selected",
+  "canonical_asset_id": "asset_01JTESTASSET00000000000000",
+  "slide_revision_id": "srev_4f26d6f5d2c0",
+  "occurred_at": "2026-06-23T00:00:00Z",
+  "actor": {
+    "type": "agent",
+    "id": "deck-master"
+  },
+  "context": {
+    "run_id": "run_01JTEST",
+    "page_task_id": "page_01",
+    "industry": "automotive",
+    "scenario": "proposal"
+  },
+  "metadata": {
+    "position": 1
+  },
+  "source_system": "deck-master"
+}

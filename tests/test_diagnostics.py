@@ -11,7 +11,7 @@ from ppt_lib.diagnostics import check_api_key, probe_lmstudio, probe_mmx, run_di
 
 
 def test_soffice_detected(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setattr("ppt_lib.diagnostics.shutil.which", lambda name: "/usr/bin/soffice")
+    monkeypatch.setattr("ppt_lib.diagnostics.shutil.which", lambda name: "/usr/bin/soffice" if name == "soffice" else None)
     monkeypatch.setattr("ppt_lib.diagnostics.probe_ollama", lambda base_url, timeout=2.0: ("skipped", "not checked", {}))
     monkeypatch.setattr(
         "ppt_lib.diagnostics.probe_lmstudio",
@@ -43,7 +43,7 @@ def test_soffice_missing_blocks_index(monkeypatch: pytest.MonkeyPatch, tmp_path:
 
 
 def test_ollama_detected_with_vision_model(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setattr("ppt_lib.diagnostics.shutil.which", lambda name: "/usr/bin/soffice")
+    monkeypatch.setattr("ppt_lib.diagnostics.shutil.which", lambda name: "/usr/bin/soffice" if name == "soffice" else None)
     monkeypatch.setattr(
         "ppt_lib.diagnostics.probe_ollama",
         lambda base_url, timeout=2.0: ("ok", "vision model available", {"model": "llava"}),
@@ -65,7 +65,7 @@ def test_ollama_detected_with_vision_model(monkeypatch: pytest.MonkeyPatch, tmp_
 
 
 def test_lmstudio_timeout_warning(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setattr("ppt_lib.diagnostics.shutil.which", lambda name: "/usr/bin/soffice")
+    monkeypatch.setattr("ppt_lib.diagnostics.shutil.which", lambda name: "/usr/bin/soffice" if name == "soffice" else None)
     monkeypatch.setattr("ppt_lib.diagnostics.probe_ollama", lambda base_url, timeout=2.0: ("warning", "not running", {}))
     monkeypatch.setattr("ppt_lib.diagnostics.probe_lmstudio", lambda base_url, timeout=2.0, vision_model=None: ("warning", "timeout", {}))
     settings = load_settings({"home_dir": tmp_path}, config_path=tmp_path / "config.yml")
@@ -86,7 +86,7 @@ def test_api_key_redacted() -> None:
 
 
 def test_report_json_shape(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setattr("ppt_lib.diagnostics.shutil.which", lambda name: "/usr/bin/soffice")
+    monkeypatch.setattr("ppt_lib.diagnostics.shutil.which", lambda name: "/usr/bin/soffice" if name == "soffice" else None)
     monkeypatch.setattr("ppt_lib.diagnostics.probe_ollama", lambda base_url, timeout=2.0: ("warning", "not running", {}))
     monkeypatch.setattr(
         "ppt_lib.diagnostics.probe_lmstudio",
@@ -102,7 +102,7 @@ def test_report_json_shape(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> N
 
 
 def test_report_json_includes_embedding_vision_and_fallback_chains(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setattr("ppt_lib.diagnostics.shutil.which", lambda name: "/usr/bin/soffice")
+    monkeypatch.setattr("ppt_lib.diagnostics.shutil.which", lambda name: "/usr/bin/soffice" if name == "soffice" else None)
     monkeypatch.setattr("ppt_lib.diagnostics.probe_ollama", lambda base_url, timeout=2.0: ("warning", "not running", {}))
     monkeypatch.setattr(
         "ppt_lib.diagnostics.probe_lmstudio",
@@ -133,7 +133,7 @@ def test_run_diagnostics_uses_configured_vision_timeout_for_lmstudio(
     tmp_path: Path,
 ) -> None:
     seen_timeouts: list[float] = []
-    monkeypatch.setattr("ppt_lib.diagnostics.shutil.which", lambda name: "/usr/bin/soffice")
+    monkeypatch.setattr("ppt_lib.diagnostics.shutil.which", lambda name: "/usr/bin/soffice" if name == "soffice" else None)
     monkeypatch.setattr("ppt_lib.diagnostics.probe_ollama", lambda base_url, timeout=2.0: ("warning", "not running", {}))
 
     def fake_probe_lmstudio(base_url: str, timeout: float = 2.0, vision_model: str | None = None):
@@ -314,7 +314,7 @@ def test_vision_chain_warns_when_slide_limit_disables_indexing(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr("ppt_lib.diagnostics.shutil.which", lambda name: "/usr/bin/soffice")
+    monkeypatch.setattr("ppt_lib.diagnostics.shutil.which", lambda name: "/usr/bin/soffice" if name == "soffice" else None)
     monkeypatch.setattr("ppt_lib.diagnostics.probe_ollama", lambda base_url, timeout=2.0: ("warning", "not running", {}))
     monkeypatch.setattr(
         "ppt_lib.diagnostics.probe_lmstudio",
@@ -341,7 +341,7 @@ def test_cloud_vision_without_key_is_not_masked_by_lmstudio(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr("ppt_lib.diagnostics.shutil.which", lambda name: "/usr/bin/soffice")
+    monkeypatch.setattr("ppt_lib.diagnostics.shutil.which", lambda name: "/usr/bin/soffice" if name == "soffice" else None)
     monkeypatch.setattr("ppt_lib.diagnostics.probe_ollama", lambda base_url, timeout=2.0: ("warning", "not running", {}))
     monkeypatch.setattr(
         "ppt_lib.diagnostics.probe_lmstudio",

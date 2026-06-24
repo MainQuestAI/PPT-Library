@@ -1,0 +1,151 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ppt-library.local/contracts/search-response.v2.schema.json",
+  "title": "PPT Library Search Response v2",
+  "type": "object",
+  "required": [
+    "_meta",
+    "data",
+    "_warnings",
+    "_errors"
+  ],
+  "properties": {
+    "_meta": {
+      "type": "object",
+      "required": [
+        "envelope",
+        "contract",
+        "producer_version",
+        "command",
+        "request_id",
+        "generated_at"
+      ],
+      "properties": {
+        "envelope": {
+          "const": "ppt_library.envelope.v2"
+        },
+        "contract": {
+          "const": "ppt_library.search_response.v2"
+        },
+        "producer_version": {
+          "type": "string"
+        },
+        "command": {
+          "const": "search"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "query_trace_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "generated_at": {
+          "type": "string"
+        },
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": true
+    },
+    "data": {
+      "type": "object",
+      "required": [
+        "candidates"
+      ],
+      "properties": {
+        "candidates": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "candidate_id",
+              "canonical_asset_id",
+              "slide_revision_id",
+              "title",
+              "score",
+              "provenance"
+            ],
+            "properties": {
+              "candidate_id": {
+                "type": "string"
+              },
+              "canonical_asset_id": {
+                "type": "string"
+              },
+              "slide_revision_id": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "summary": {
+                "type": "string"
+              },
+              "score": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "score_breakdown": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                }
+              },
+              "provenance": {
+                "type": "object"
+              },
+              "preview_uri": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "warnings": {
+                "type": "array",
+                "items": {
+                  "type": "object"
+                }
+              }
+            },
+            "additionalProperties": true
+          }
+        },
+        "trace": {
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": true
+    },
+    "_warnings": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "_errors": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    }
+  },
+  "additionalProperties": false
+}

@@ -280,7 +280,7 @@ uv run python scripts/release_check.py --output json
 uv build
 ```
 
-当前测试基线：534 automated tests。
+当前测试基线：1083 automated tests。
 
 ## License
 

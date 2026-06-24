@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ppt-library.local/contracts/asset-identity.v1.schema.json",
+  "title": "PPT Library Asset Identity v1",
+  "type": "object",
+  "required": [
+    "contract",
+    "canonical_asset_id",
+    "slide_revision_id",
+    "identity_status",
+    "fingerprints"
+  ],
+  "properties": {
+    "contract": {
+      "const": "ppt_library.asset_identity.v1"
+    },
+    "canonical_asset_id": {
+      "type": "string",
+      "pattern": "^asset_[A-Za-z0-9_-]+$"
+    },
+    "slide_revision_id": {
+      "type": "string",
+      "pattern": "^srev_[A-Za-z0-9_-]+$"
+    },
+    "deck_asset_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "deck_revision_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "identity_status": {
+      "enum": [
+        "resolved",
+        "legacy_unresolved",
+        "needs_review",
+        "manually_assigned"
+      ]
+    },
+    "source_locator": {
+      "type": "object",
+      "required": [
+        "provider",
+        "opaque_id"
+      ],
+      "properties": {
+        "provider": {
+          "type": "string"
+        },
+        "opaque_id": {
+          "type": "string"
+        },
+        "display_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revision": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": true
+    },
+    "fingerprints": {
+      "type": "object",
+      "required": [
+        "algorithm_version",
+        "content_hash"
+      ],
+      "properties": {
+        "algorithm_version": {
+          "type": "string"
+        },
+        "content_hash": {
+          "type": "string"
+        },
+        "text_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "visual_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "layout_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": true
+    },
+    "legacy_slide_id": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 1
+    }
+  },
+  "additionalProperties": true
+}

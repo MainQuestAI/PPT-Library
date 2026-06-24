@@ -278,7 +278,7 @@ uv run python scripts/release_check.py --output json
 uv build
 ```
 
-Current baseline: 534 automated tests.
+Current baseline: 1083 automated tests.
 
 ## License
 

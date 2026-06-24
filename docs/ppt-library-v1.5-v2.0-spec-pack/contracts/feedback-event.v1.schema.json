@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ppt-library.local/contracts/feedback-event.v1.schema.json",
+  "title": "PPT Library Feedback Event v1",
+  "type": "object",
+  "required": [
+    "contract",
+    "event_id",
+    "idempotency_key",
+    "event_type",
+    "occurred_at",
+    "actor",
+    "context"
+  ],
+  "properties": {
+    "contract": {
+      "const": "ppt_library.feedback_event.v1"
+    },
+    "event_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "idempotency_key": {
+      "type": "string",
+      "minLength": 1
+    },
+    "event_type": {
+      "enum": [
+        "candidate.surfaced",
+        "candidate.opened",
+        "candidate.reviewed",
+        "candidate.selected",
+        "candidate.rejected",
+        "candidate.rejection_reasoned",
+        "asset.assembled",
+        "asset.retained",
+        "asset.modified",
+        "asset.replaced",
+        "asset.delivered",
+        "deal.outcome_linked",
+        "asset.rated",
+        "asset.tag_corrected"
+      ]
+    },
+    "canonical_asset_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "slide_revision_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "occurred_at": {
+      "type": "string"
+    },
+    "actor": {
+      "type": "object",
+      "required": [
+        "type",
+        "id"
+      ],
+      "properties": {
+        "type": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "context": {
+      "type": "object"
+    },
+    "metadata": {
+      "type": "object"
+    },
+    "source_system": {
+      "type": "string"
+    }
+  },
+  "anyOf": [
+    {
+      "required": [
+        "canonical_asset_id"
+      ]
+    },
+    {
+      "required": [
+        "slide_revision_id"
+      ]
+    }
+  ],
+  "additionalProperties": true
+}

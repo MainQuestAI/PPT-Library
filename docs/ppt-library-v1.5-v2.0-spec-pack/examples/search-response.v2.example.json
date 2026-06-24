@@ -1,0 +1,45 @@
+{
+  "_meta": {
+    "envelope": "ppt_library.envelope.v2",
+    "contract": "ppt_library.search_response.v2",
+    "producer_version": "1.6.0",
+    "command": "search",
+    "request_id": "req_01JTEST",
+    "run_id": "run_01JTEST",
+    "query_trace_id": "qry_01JTEST",
+    "generated_at": "2026-06-23T00:00:00Z",
+    "duration_ms": 125
+  },
+  "data": {
+    "candidates": [
+      {
+        "candidate_id": "cand_01",
+        "canonical_asset_id": "asset_01JTESTASSET00000000000000",
+        "slide_revision_id": "srev_4f26d6f5d2c0",
+        "title": "AI 搜索平台总体架构",
+        "summary": "平台能力和数据链路架构页。",
+        "score": 0.87,
+        "score_breakdown": {
+          "lexical": 0.72,
+          "semantic": 0.91,
+          "rerank": 0.88,
+          "business": 0.05,
+          "health_penalty": -0.02
+        },
+        "provenance": {
+          "source_locator": "src_01JTEST",
+          "page_number": 12,
+          "deck_family_id": "family_01"
+        },
+        "preview_uri": "file:///example/preview.png",
+        "warnings": []
+      }
+    ],
+    "trace": {
+      "profile": "deck_master@1",
+      "fallbacks": []
+    }
+  },
+  "_warnings": [],
+  "_errors": []
+}
