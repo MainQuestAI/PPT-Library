@@ -211,6 +211,62 @@ def test_cli_select_slides_plan_flag(tmp_path: Path, monkeypatch, capsys) -> Non
     assert payload["report"]["gaps"] == ["opener"]
 
 
+def test_cli_select_slides_deck_master_contract_output_file(tmp_path: Path, monkeypatch, capsys) -> None:
+    from ppt_lib.cli import main
+    from ppt_lib.selector import RoleSelection
+
+    monkeypatch.setattr(
+        "ppt_lib.cli.select_slides_from_plan",
+        lambda settings, **kwargs: SelectionReport(
+            query="from plan", options={"roles": ["opener"]},
+            roles=[RoleSelection("opener", [], True)],
+            total_slides=0, gaps=["opener"],
+            timestamp="2026-05-25T00:00:00+00:00",
+        ),
+    )
+
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text(
+        json.dumps({"beats": [{"beat_id": "beat-001", "page_task_id": "page-001", "role": "opener"}]}),
+        encoding="utf-8",
+    )
+    out_file = tmp_path / "selection.json"
+
+    exit_code = main([
+        "--home-dir", str(tmp_path),
+        "select-slides",
+        "--plan", str(plan_file),
+        "--contract", "deck-master.v1",
+        "--run-id", "dm-run",
+        "--output", str(out_file),
+    ])
+
+    assert exit_code == 0
+    data = json.loads(out_file.read_text(encoding="utf-8"))
+    assert data["schema_version"] == "deck_master_ppt_library_selection.v1"
+    assert data["run_id"] == "dm-run"
+    assert data["source"] == "ppt-library"
+    assert data["selections"][0]["beat_id"] == "beat-001"
+    assert data["selections"][0]["page_task_id"] == "page-001"
+    assert data["selections"][0]["candidates"] == []
+
+
+def test_cli_select_slides_deck_master_contract_requires_run_id(tmp_path: Path, capsys) -> None:
+    from ppt_lib.cli import main
+
+    exit_code = main([
+        "--home-dir", str(tmp_path),
+        "select-slides",
+        "--roles", "case",
+        "--contract", "deck-master.v1",
+    ])
+
+    assert exit_code == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["_errors"][0]["code"] == "SELECT_SLIDES_ERROR"
+    assert "--run-id is required" in payload["_errors"][0]["message"]
+
+
 # --- build-manifest top-n strategy ---
 
 def test_cli_build_manifest_top_n_strategy(tmp_path: Path, monkeypatch, capsys) -> None:

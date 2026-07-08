@@ -452,6 +452,8 @@ def build_parser() -> argparse.ArgumentParser:
     select_parser.add_argument("--ranking", choices=["classic", "business"], default="classic")
     select_parser.add_argument("--threshold", type=float, default=0.0)
     select_parser.add_argument("--output", help="write selection-report to file instead of stdout")
+    select_parser.add_argument("--contract", choices=["default", "deck-master.v1"], default="default")
+    select_parser.add_argument("--run-id", help="Deck Master run id; required with --contract deck-master.v1")
     select_parser.add_argument("--record-usage", action="store_true", help="write slide_usage for top-1 per role")
     select_parser.add_argument("--deal-id", type=int, help="deal ID for --record-usage")
 
@@ -1113,6 +1115,10 @@ def _dispatch(args: argparse.Namespace, settings) -> tuple[dict[str, object], li
         return {"result": output}, []
     if args.command == "select-slides":
         try:
+            if args.contract == "deck-master.v1" and not args.run_id:
+                return {
+                    "report": None
+                }, [ErrorRecord("SELECT_SLIDES_ERROR", "--run-id is required with --contract deck-master.v1.", "select-slides")]
             if args.plan:
                 report = select_slides_from_plan(
                     settings,
@@ -1150,6 +1156,24 @@ def _dispatch(args: argparse.Namespace, settings) -> tuple[dict[str, object], li
         report_json = _selection_report_to_json(report)
         if usage_count:
             report_json["usage_recorded"] = usage_count
+        if args.contract == "deck-master.v1":
+            contract_json = _selection_report_to_deck_master_contract(
+                report,
+                run_id=args.run_id,
+                plan_path=_normalize_path(Path(args.plan)) if args.plan else None,
+            )
+            if args.output:
+                out = _normalize_path(Path(args.output))
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_text(json.dumps(contract_json, indent=2, ensure_ascii=False), encoding="utf-8")
+                return {
+                    "contract_path": str(out),
+                    "schema_version": contract_json["schema_version"],
+                    "run_id": args.run_id,
+                    "total_slides": report.total_slides,
+                    "gaps": report.gaps,
+                }, []
+            return contract_json, []
         if args.output:
             out = _normalize_path(Path(args.output))
             out.parent.mkdir(parents=True, exist_ok=True)
@@ -1390,6 +1414,74 @@ def _selection_report_to_json(report) -> dict[str, object]:
         "total_slides": report.total_slides,
         "gaps": report.gaps,
     }
+
+
+def _selection_report_to_deck_master_contract(
+    report,
+    *,
+    run_id: str,
+    plan_path: Path | None = None,
+) -> dict[str, object]:
+    refs = _deck_master_selection_refs(report, plan_path)
+    selections: list[dict[str, object]] = []
+    for index, role_selection in enumerate(report.roles):
+        ref = refs[index] if index < len(refs) else {}
+        role = role_selection.role
+        beat_id = str(ref.get("beat_id") or role or f"beat_{index + 1}")
+        selections.append(
+            {
+                "beat_id": beat_id,
+                "page_task_id": str(ref.get("page_task_id") or beat_id),
+                "role": role,
+                "candidates": [_search_result_to_json(slide) for slide in role_selection.slides],
+            }
+        )
+
+    return {
+        "schema_version": "deck_master_ppt_library_selection.v1",
+        "run_id": run_id,
+        "source": "ppt-library",
+        "producer_version": _producer_version(),
+        "selections": selections,
+        "gaps": report.gaps,
+    }
+
+
+def _deck_master_selection_refs(report, plan_path: Path | None) -> list[dict[str, object]]:
+    if plan_path is None:
+        return [{"beat_id": role_selection.role, "page_task_id": role_selection.role} for role_selection in report.roles]
+    try:
+        payload = json.loads(plan_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return [{"beat_id": role_selection.role, "page_task_id": role_selection.role} for role_selection in report.roles]
+    beats = payload.get("beats") if isinstance(payload, dict) else None
+    if isinstance(beats, list) and beats:
+        refs: list[dict[str, object]] = []
+        for index, beat in enumerate(beats):
+            if not isinstance(beat, dict):
+                continue
+            role = str(beat.get("role") or f"beat_{index + 1}")
+            beat_id = str(beat.get("beat_id") or beat.get("id") or role)
+            refs.append(
+                {
+                    "beat_id": beat_id,
+                    "page_task_id": str(beat.get("page_task_id") or beat_id),
+                    "role": role,
+                }
+            )
+        if refs:
+            return refs
+    roles = payload.get("roles") if isinstance(payload, dict) else None
+    if isinstance(roles, list):
+        return [{"beat_id": str(role), "page_task_id": str(role)} for role in roles]
+    return [{"beat_id": role_selection.role, "page_task_id": role_selection.role} for role_selection in report.roles]
+
+
+def _producer_version() -> str:
+    try:
+        return metadata.version("ppt-library")
+    except metadata.PackageNotFoundError:
+        return "2.0.0"
 
 
 def _manifest_from_selection_payload(
