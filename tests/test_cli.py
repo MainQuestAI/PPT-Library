@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
+import types
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -150,6 +152,92 @@ def test_cli_search_outputs_envelope(monkeypatch, capsys, tmp_path: Path) -> Non
     assert payload["_meta"]["command"] == "search"
 
 
+def test_cli_search_contract_v2_emits_valid_native_envelope(monkeypatch, capsys, tmp_path: Path) -> None:
+    from ppt_lib.contracts import get_registry
+
+    seen: dict[str, object] = {}
+
+    def fake_search_v2(self, query, **kwargs):
+        seen.update({"query": query, **kwargs})
+        return {
+            "_meta": {
+                "envelope": "ppt_library.envelope.v2",
+                "contract": "ppt_library.search_response.v2",
+                "producer_version": "2.0.1.dev0",
+                "command": "search",
+                "request_id": "req-cli-v2",
+                "generated_at": "2026-07-13T00:00:00Z",
+            },
+            "data": {"candidates": [], "trace": None},
+            "_warnings": [],
+            "_errors": [],
+        }
+
+    monkeypatch.setattr("ppt_lib.services.app_services.SearchService.search_v2", fake_search_v2)
+
+    exit_code = main([
+        "--home-dir", str(tmp_path), "search", "architecture", "--contract-v2",
+        "--ranking", "business", "--narrative-role", "architecture", "--output", "text",
+    ])
+    payload = read_stdout(capsys)
+
+    assert exit_code == 0
+    assert payload["_meta"]["envelope"] == "ppt_library.envelope.v2"
+    assert payload["_meta"]["contract"] == "ppt_library.search_response.v2"
+    assert "schema_version" not in payload["_meta"]
+    assert get_registry().validate("search-response.v2", payload) == []
+    assert seen["query"] == "architecture"
+    assert seen["profile_name"] == "deck_master"
+    assert seen["filters"] == {"narrative_role": "architecture"}
+
+
+def test_cli_search_contract_v2_rejects_invalid_service_payload(monkeypatch, capsys, tmp_path: Path) -> None:
+    from ppt_lib.contracts import get_registry
+
+    monkeypatch.setattr(
+        "ppt_lib.services.app_services.SearchService.search_v2",
+        lambda self, query, **kwargs: {"unexpected": True},
+    )
+
+    exit_code = main(["--home-dir", str(tmp_path), "search", "query", "--contract-v2"])
+    payload = read_stdout(capsys)
+
+    assert exit_code == 1
+    assert payload["_errors"][0]["code"] == "CONTRACT_VALIDATION_FAILED"
+    assert payload["_meta"]["envelope"] == "ppt_library.envelope.v2"
+    assert get_registry().validate("search-response.v2", payload) == []
+
+
+def test_cli_search_contract_v2_preserves_native_error_envelope(monkeypatch, capsys, tmp_path: Path) -> None:
+    from ppt_lib.contracts import get_registry
+
+    def fail_search_v2(self, query, **kwargs):
+        raise ValueError("query rejected")
+
+    monkeypatch.setattr("ppt_lib.services.app_services.SearchService.search_v2", fail_search_v2)
+
+    exit_code = main(["--home-dir", str(tmp_path), "search", "query", "--contract-v2"])
+    payload = read_stdout(capsys)
+
+    assert exit_code == 1
+    assert payload["_errors"][0]["code"] == "INVALID_INPUT"
+    assert "query rejected" in payload["_errors"][0]["message"]
+    assert get_registry().validate("search-response.v2", payload) == []
+
+
+def test_cli_search_contract_v2_maps_backend_failure_to_registered_code(monkeypatch, capsys, tmp_path: Path) -> None:
+    def fail_search_v2(self, query, **kwargs):
+        raise RuntimeError("backend offline")
+
+    monkeypatch.setattr("ppt_lib.services.app_services.SearchService.search_v2", fail_search_v2)
+
+    exit_code = main(["--home-dir", str(tmp_path), "search", "query", "--contract-v2"])
+    payload = read_stdout(capsys)
+
+    assert exit_code == 1
+    assert payload["_errors"][0]["code"] == "SEARCH_BACKEND_UNAVAILABLE"
+
+
 def test_cli_search_text_output_is_human_readable(monkeypatch, capsys, tmp_path: Path) -> None:
     monkeypatch.setattr(
         "ppt_lib.cli.search",
@@ -190,6 +278,19 @@ def test_cli_version_flag_outputs_version(capsys) -> None:
 
     assert exit_code == 0
     assert output.startswith("ppt-lib ")
+
+
+def test_package_version_fallback_is_explicitly_unknown(monkeypatch) -> None:
+    from importlib import metadata
+
+    from ppt_lib.cli import _package_version
+
+    def missing_distribution(name: str) -> str:
+        raise metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr("ppt_lib.cli.metadata.version", missing_distribution)
+
+    assert _package_version() == "0+unknown"
 
 
 def test_cli_search_preserves_search_error_code(monkeypatch, capsys, tmp_path: Path) -> None:
@@ -543,6 +644,149 @@ def test_cli_watch_missing_root_outputs_structured_error(monkeypatch, capsys, tm
     assert exit_code == 1
     assert payload["status"] == "failed"
     assert payload["_errors"][0]["code"] == "WATCH_ROOT_NOT_FOUND"
+
+
+def test_cli_watch_surfaces_index_result_warnings(monkeypatch, capsys, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        "ppt_lib.cli.watch_directory",
+        lambda root, settings, callback: [
+            ErrorRecord("WATCH_INDEX_FAILED", "bad.pptx: invalid package", "watch", "warning")
+        ],
+    )
+
+    exit_code = main(["--home-dir", str(tmp_path), "watch", str(tmp_path)])
+    payload = read_stdout(capsys)
+
+    assert exit_code == 0
+    assert payload["status"] == "completed_with_errors"
+    assert payload["_errors"][0]["code"] == "WATCH_INDEX_FAILED"
+    assert payload["_errors"][0]["severity"] == "warning"
+
+
+def test_cli_workbench_remote_bind_requires_explicit_opt_in(capsys, tmp_path: Path) -> None:
+    exit_code = main([
+        "--home-dir", str(tmp_path), "workbench", "start", "--host", "0.0.0.0",
+    ])
+    payload = read_stdout(capsys)
+
+    assert exit_code == 1
+    assert payload["_errors"][0]["code"] == "WORKBENCH_REMOTE_BIND_BLOCKED"
+
+
+def test_cli_workbench_missing_extra_returns_actionable_error(monkeypatch, capsys, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        "ppt_lib.api_server.create_api_app",
+        lambda config: (_ for _ in ()).throw(ImportError("Install ppt-library[workbench]")),
+    )
+
+    exit_code = main(["--home-dir", str(tmp_path), "workbench", "start"])
+    payload = read_stdout(capsys)
+
+    assert exit_code == 1
+    assert payload["_errors"][0]["code"] == "WORKBENCH_UNAVAILABLE"
+    assert "workbench" in payload["_errors"][0]["message"]
+
+
+def test_cli_workbench_start_initializes_fresh_home(monkeypatch, capsys, tmp_path: Path) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_create_app(config):
+        seen["settings"] = config.settings
+        return object()
+
+    monkeypatch.setattr("ppt_lib.api_server.create_api_app", fake_create_app)
+    monkeypatch.setitem(
+        sys.modules,
+        "uvicorn",
+        types.SimpleNamespace(
+            run=lambda app, **kwargs: seen.update(kwargs),
+        ),
+    )
+
+    exit_code = main(["--home-dir", str(tmp_path), "workbench", "start", "--port", "9901"])
+    payload = read_stdout(capsys)
+
+    assert exit_code == 0
+    assert payload["_errors"] == []
+    assert seen["host"] == "127.0.0.1"
+    assert seen["port"] == 9901
+    assert seen["settings"].home_dir == tmp_path
+    conn = sqlite3.connect(tmp_path / "index.db")
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    conn.close()
+    assert {"presentations", "slides", "jobs"} <= tables
+
+
+def test_cli_workbench_remote_start_explains_security_boundary(monkeypatch, capsys, tmp_path: Path) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_create_app(config):
+        seen["config"] = config
+        return object()
+
+    monkeypatch.setenv("WORKBENCH_ADMIN_TOKEN", "shared-admin-token")
+    monkeypatch.setattr("ppt_lib.api_server.create_api_app", fake_create_app)
+    monkeypatch.setitem(
+        sys.modules,
+        "uvicorn",
+        types.SimpleNamespace(run=lambda app, **kwargs: seen.update(kwargs)),
+    )
+
+    exit_code = main([
+        "--home-dir", str(tmp_path), "workbench", "start",
+        "--host", "0.0.0.0", "--allow-remote",
+        "--auth-token-env", "WORKBENCH_ADMIN_TOKEN",
+        "--cors-origin", "https://workbench.example.test",
+        "--workspace", "review",
+    ])
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert exit_code == 0
+    assert payload["_errors"] == []
+    assert seen["host"] == "0.0.0.0"
+    assert seen["config"].workspace_id == "review"
+    assert "single-process namespace" in captured.err
+    assert "shared administrator credential" in captured.err
+    assert "TLS reverse proxy or SSH tunnel" in captured.err
+
+
+def test_cli_workbench_status_uses_requested_endpoint_and_token(monkeypatch, capsys, tmp_path: Path) -> None:
+    seen: dict[str, object] = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def read(self):
+            return b'{"status":"ok"}'
+
+    def fake_urlopen(request, timeout):
+        seen["url"] = request.full_url
+        seen["authorization"] = request.headers.get("Authorization")
+        seen["timeout"] = timeout
+        return Response()
+
+    monkeypatch.setenv("WORKBENCH_TEST_TOKEN", "secret-token")
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    exit_code = main([
+        "--home-dir", str(tmp_path), "workbench", "status",
+        "--host", "localhost", "--port", "9900", "--auth-token-env", "WORKBENCH_TEST_TOKEN",
+    ])
+    payload = read_stdout(capsys)
+
+    assert exit_code == 0
+    assert seen == {
+        "url": "http://localhost:9900/api/v1/health",
+        "authorization": "Bearer secret-token",
+        "timeout": 2,
+    }
+    assert payload["running"] is True
+    assert payload["endpoint"] == "http://localhost:9900/api/v1/health"
 
 
 def test_cli_schema_outputs_json_schema(capsys, tmp_path: Path) -> None:
@@ -2084,11 +2328,11 @@ def test_cli_assets_prune_removes_orphan_slide_assets(capsys, tmp_path: Path) ->
     raw_conn = sqlite3.connect(tmp_path / "index.db")
     raw_conn.execute("PRAGMA foreign_keys = OFF")
     raw_conn.execute(
-        "INSERT INTO slide_assets (slide_id, asset_type, asset_uri) VALUES (?, ?, ?)",
+        "INSERT INTO slide_artifacts (slide_id, asset_type, asset_uri) VALUES (?, ?, ?)",
         (999, "thumbnail", str(orphan_file)),
     )
     raw_conn.execute(
-        "INSERT INTO slide_assets (slide_id, asset_type, asset_uri) VALUES (?, ?, ?)",
+        "INSERT INTO slide_artifacts (slide_id, asset_type, asset_uri) VALUES (?, ?, ?)",
         (1000, "thumbnail", str(unsafe_file)),
     )
     raw_conn.commit()
@@ -2115,7 +2359,7 @@ def test_cli_assets_prune_removes_orphan_slide_assets(capsys, tmp_path: Path) ->
     assert unsafe_file.exists()
 
     check_conn = sqlite3.connect(tmp_path / "index.db")
-    assert check_conn.execute("SELECT asset_uri FROM slide_assets").fetchone()[0] == str(unsafe_file)
+    assert check_conn.execute("SELECT asset_uri FROM slide_artifacts").fetchone()[0] == str(unsafe_file)
     check_conn.close()
 
 

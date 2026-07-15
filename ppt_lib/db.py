@@ -9,7 +9,8 @@ from typing import Literal, cast
 
 import numpy as np
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
+SOURCE_LINK_BACKFILL_META_KEY = "presentation_source_links_backfill_v1"
 
 
 class DatabaseError(RuntimeError):
@@ -41,6 +42,13 @@ class SlideRecord:
     source: str
     extraction_warnings: list[str]
     metadata_json: dict[str, object]
+
+
+@dataclass(frozen=True)
+class SlideReplacementResult:
+    changed_slide_ids: tuple[int, ...]
+    new_slide_ids: tuple[int, ...]
+    removed_slide_ids: tuple[int, ...]
 
 
 @dataclass(frozen=True)
@@ -167,6 +175,15 @@ def init_db(
           last_validated_at TEXT
         );
 
+        CREATE TABLE IF NOT EXISTS presentation_source_links (
+          id INTEGER PRIMARY KEY,
+          presentation_id INTEGER NOT NULL REFERENCES presentations(id) ON DELETE CASCADE,
+          library_source_id INTEGER NOT NULL REFERENCES library_sources(id) ON DELETE CASCADE,
+          match_type TEXT NOT NULL CHECK(match_type IN ('exact','descendant','manual')),
+          linked_at TEXT NOT NULL,
+          UNIQUE(presentation_id, library_source_id)
+        );
+
         CREATE TABLE IF NOT EXISTS slides (
           id INTEGER PRIMARY KEY,
           presentation_id INTEGER REFERENCES presentations(id),
@@ -260,11 +277,11 @@ def init_db(
           created_at TEXT
         );
 
-        CREATE TABLE IF NOT EXISTS slide_assets (
+        CREATE TABLE IF NOT EXISTS slide_artifacts (
           id INTEGER PRIMARY KEY,
-          slide_id INTEGER NOT NULL REFERENCES slides(id),
-          workspace_profile_id INTEGER REFERENCES workspace_profiles(id),
-          source_id INTEGER REFERENCES library_sources(id),
+          slide_id INTEGER NOT NULL REFERENCES slides(id) ON DELETE CASCADE,
+          workspace_profile_id INTEGER REFERENCES workspace_profiles(id) ON DELETE SET NULL,
+          source_id INTEGER REFERENCES library_sources(id) ON DELETE SET NULL,
           asset_type TEXT NOT NULL,
           asset_uri TEXT NOT NULL,
           asset_hash TEXT,
@@ -340,11 +357,13 @@ def init_db(
         );
 
         CREATE INDEX IF NOT EXISTS idx_presentations_path ON presentations(path);
+        CREATE INDEX IF NOT EXISTS idx_presentation_source_links_presentation ON presentation_source_links(presentation_id);
+        CREATE INDEX IF NOT EXISTS idx_presentation_source_links_source ON presentation_source_links(library_source_id);
         CREATE INDEX IF NOT EXISTS idx_slides_presentation ON slides(presentation_id);
         CREATE INDEX IF NOT EXISTS idx_slides_screenshot_hash ON slides(screenshot_hash);
         CREATE INDEX IF NOT EXISTS idx_index_jobs_file_status ON index_jobs(file_path, status);
-        CREATE INDEX IF NOT EXISTS idx_slide_assets_slide_id ON slide_assets(slide_id);
-        CREATE INDEX IF NOT EXISTS idx_slide_assets_profile_id ON slide_assets(workspace_profile_id);
+        CREATE INDEX IF NOT EXISTS idx_slide_artifacts_slide_id ON slide_artifacts(slide_id);
+        CREATE INDEX IF NOT EXISTS idx_slide_artifacts_profile_id ON slide_artifacts(workspace_profile_id);
         CREATE INDEX IF NOT EXISTS idx_duplicate_groups_canonical ON duplicate_groups(canonical_slide_id);
         CREATE INDEX IF NOT EXISTS idx_slide_duplicate_members_group ON slide_duplicate_members(duplicate_group_id);
         CREATE INDEX IF NOT EXISTS idx_slide_duplicate_members_slide ON slide_duplicate_members(slide_id);
@@ -355,9 +374,18 @@ def init_db(
         CREATE INDEX IF NOT EXISTS idx_slide_importance_slide ON slide_importance(slide_id);
         """
     )
-    _ensure_schema_version(conn, backups_dir=backups_dir)
-    _ensure_extended_indexes(conn)
     _ensure_v5_tables(conn)
+    _ensure_schema_version(conn, backups_dir=backups_dir)
+    _ensure_presentation_source_links_backfill(conn)
+    _ensure_extended_indexes(conn)
+    from ppt_lib.asset_schema import create_asset_schema_tables
+    from ppt_lib.fts_search import create_fts_tables, fts_tables_exist, index_from_slides
+
+    create_asset_schema_tables(conn, commit=False)
+    had_fts = fts_tables_exist(conn)
+    create_fts_tables(conn, commit=False)
+    if not had_fts:
+        index_from_slides(conn, commit=False)
     conn.commit()
 
 
@@ -513,6 +541,13 @@ def upsert_presentation(conn: sqlite3.Connection, record: PresentationRecord, *,
 def upsert_slide(conn: sqlite3.Connection, record: SlideRecord, *, commit: bool = True) -> int:
     _validate_source(record.source)
     embedding_blob = _serialize_embedding(record.embedding)
+    existing = conn.execute(
+        """SELECT id, title, text_content, screenshot_hash, metadata_json
+           FROM slides WHERE presentation_id = ? AND slide_index = ?""",
+        (record.presentation_id, record.slide_index),
+    ).fetchone()
+    metadata_payload = json.dumps(record.metadata_json, ensure_ascii=False, sort_keys=True)
+    changed = existing is not None and _slide_record_changed(existing, record)
     try:
         conn.execute(
             """
@@ -539,18 +574,38 @@ def upsert_slide(conn: sqlite3.Connection, record: SlideRecord, *, commit: bool 
                 record.screenshot_hash,
                 record.source,
                 json.dumps(record.extraction_warnings, ensure_ascii=False),
-                json.dumps(record.metadata_json, ensure_ascii=False),
+                metadata_payload,
             ),
         )
+        if changed:
+            conn.execute(
+                """UPDATE slides
+                   SET raw_text = NULL,
+                       ai_summary = NULL,
+                       visual_summary = NULL,
+                       summary_status = 'pending',
+                       profile_id = NULL,
+                       text_hash = NULL,
+                       content_hash = NULL
+                   WHERE id = ?""",
+                (int(existing[0]),),
+            )
+            conn.execute("DELETE FROM slide_importance WHERE slide_id = ?", (int(existing[0]),))
+            conn.execute("DELETE FROM deck_insights WHERE presentation_id = ?", (record.presentation_id,))
+        row = conn.execute(
+            "SELECT id FROM slides WHERE presentation_id = ? AND slide_index = ?",
+            (record.presentation_id, record.slide_index),
+        ).fetchone()
+        slide_id = int(row[0])
+        from ppt_lib.fts_search import fts_tables_exist, index_from_slides
+
+        if fts_tables_exist(conn):
+            index_from_slides(conn, slide_ids=[slide_id], commit=False)
         if commit:
             conn.commit()
     except sqlite3.Error as exc:
         raise DatabaseError(f"Failed to upsert slide: {exc}") from exc
-    row = conn.execute(
-        "SELECT id FROM slides WHERE presentation_id = ? AND slide_index = ?",
-        (record.presentation_id, record.slide_index),
-    ).fetchone()
-    return int(row[0])
+    return slide_id
 
 
 def upsert_library_source(
@@ -610,6 +665,163 @@ def list_library_sources(conn: sqlite3.Connection) -> list[LibrarySourceRecord]:
         )
         for row in rows
     ]
+
+
+def sync_presentation_source_links(
+    conn: sqlite3.Connection,
+    presentation_id: int,
+    presentation_path: Path,
+    *,
+    commit: bool = True,
+) -> int:
+    """Rebuild deterministic source links for one presentation."""
+    source_rows = _library_source_paths(conn)
+    return _sync_presentation_source_links(
+        conn,
+        presentation_id,
+        presentation_path,
+        source_rows,
+        commit=commit,
+    )
+
+
+def _sync_presentation_source_links(
+    conn: sqlite3.Connection,
+    presentation_id: int,
+    presentation_path: Path,
+    source_rows: list[tuple[int, Path]],
+    *,
+    commit: bool,
+) -> int:
+    normalized_presentation = presentation_path.expanduser().resolve(strict=False)
+    conn.execute(
+        "DELETE FROM presentation_source_links WHERE presentation_id = ? AND match_type != 'manual'",
+        (presentation_id,),
+    )
+    linked = 0
+    for source_id, source_path in source_rows:
+        match_type = _source_match_type_normalized(normalized_presentation, source_path)
+        if match_type is None:
+            continue
+        conn.execute(
+            """
+            INSERT INTO presentation_source_links (
+                presentation_id, library_source_id, match_type, linked_at
+            ) VALUES (?, ?, ?, ?)
+            ON CONFLICT(presentation_id, library_source_id) DO UPDATE SET
+                match_type=excluded.match_type,
+                linked_at=excluded.linked_at
+            """,
+            (presentation_id, int(source_id), match_type, _now_iso()),
+        )
+        linked += 1
+    if commit:
+        conn.commit()
+    return linked
+
+
+def backfill_presentation_source_links(conn: sqlite3.Connection) -> int:
+    source_rows = _library_source_paths(conn)
+    presentation_rows = conn.execute("SELECT id, path FROM presentations").fetchall()
+    return _backfill_presentation_source_links_for_rows(conn, presentation_rows, source_rows)
+
+
+def _backfill_unlinked_presentation_source_links(conn: sqlite3.Connection) -> int:
+    source_rows = _library_source_paths(conn)
+    presentation_rows = conn.execute(
+        """
+        SELECT p.id, p.path
+        FROM presentations p
+        WHERE NOT EXISTS (
+          SELECT 1
+          FROM presentation_source_links psl
+          WHERE psl.presentation_id = p.id
+            AND psl.match_type != 'manual'
+        )
+        """
+    ).fetchall()
+    return _backfill_presentation_source_links_for_rows(conn, presentation_rows, source_rows)
+
+
+def _backfill_presentation_source_links_for_rows(
+    conn: sqlite3.Connection,
+    presentation_rows: list[tuple[int, str | Path]],
+    source_rows: list[tuple[int, Path]],
+) -> int:
+    linked = 0
+    for presentation_id, raw_path in presentation_rows:
+        linked += _sync_presentation_source_links(
+            conn,
+            presentation_id,
+            Path(raw_path),
+            source_rows,
+            commit=False,
+        )
+    return linked
+
+
+def _ensure_presentation_source_links_backfill(conn: sqlite3.Connection) -> None:
+    presentation_count = int(conn.execute("SELECT COUNT(*) FROM presentations").fetchone()[0])
+    source_count = int(conn.execute("SELECT COUNT(*) FROM library_sources").fetchone()[0])
+    if presentation_count == 0 or source_count == 0:
+        return
+
+    fingerprint = f"{presentation_count}:{source_count}"
+    row = conn.execute(
+        "SELECT value FROM _meta WHERE key = ?",
+        (SOURCE_LINK_BACKFILL_META_KEY,),
+    ).fetchone()
+    needs_full_backfill = row is None
+    if row is not None and row[0] != fingerprint:
+        try:
+            previous_source_count = int(str(row[0]).split(":", 1)[1])
+        except (IndexError, TypeError, ValueError):
+            needs_full_backfill = True
+        else:
+            needs_full_backfill = previous_source_count != source_count
+    if row is not None and row[0] == fingerprint:
+        return
+
+    if needs_full_backfill:
+        backfill_presentation_source_links(conn)
+    else:
+        _backfill_unlinked_presentation_source_links(conn)
+    conn.execute(
+        "INSERT OR REPLACE INTO _meta (key, value) VALUES (?, ?)",
+        (SOURCE_LINK_BACKFILL_META_KEY, fingerprint),
+    )
+
+
+def _library_source_paths(conn: sqlite3.Connection) -> list[tuple[int, Path]]:
+    rows = conn.execute("SELECT id, name, metadata_json FROM library_sources").fetchall()
+    return [
+        (int(source_id), _library_source_path(name, metadata_raw))
+        for source_id, name, metadata_raw in rows
+    ]
+
+
+def _library_source_path(name: str, metadata_raw: str | None) -> Path:
+    try:
+        metadata_payload = json.loads(metadata_raw) if metadata_raw else {}
+    except json.JSONDecodeError:
+        metadata_payload = {}
+    raw_path = metadata_payload.get("path") if isinstance(metadata_payload, dict) else None
+    return Path(str(raw_path or name)).expanduser().resolve(strict=False)
+
+
+def _source_match_type(presentation_path: Path, source_path: Path) -> str | None:
+    normalized_presentation = presentation_path.expanduser().resolve(strict=False)
+    normalized_source = source_path.expanduser().resolve(strict=False)
+    return _source_match_type_normalized(normalized_presentation, normalized_source)
+
+
+def _source_match_type_normalized(presentation_path: Path, source_path: Path) -> str | None:
+    if presentation_path == source_path:
+        return "exact"
+    if source_path.suffix.lower() in {".ppt", ".pptx", ".pptm"}:
+        return None
+    source_prefix = f"{str(source_path).rstrip('/')}/"
+    return "descendant" if str(presentation_path).startswith(source_prefix) else None
 
 
 def create_workspace_profile(
@@ -718,13 +930,17 @@ def update_slide_summary_fields(
             """,
             (raw_text, ai_summary, visual_summary, summary_status, profile_id, text_hash, content_hash, slide_id),
         )
+        from ppt_lib.fts_search import fts_tables_exist, index_from_slides
+
+        if fts_tables_exist(conn):
+            index_from_slides(conn, slide_ids=[slide_id], commit=False)
         if commit:
             conn.commit()
     except sqlite3.Error as exc:
         raise DatabaseError(f"Failed to update slide summary fields: {exc}") from exc
 
 
-def upsert_slide_asset(
+def upsert_slide_artifact(
     conn: sqlite3.Connection,
     *,
     slide_id: int,
@@ -740,7 +956,7 @@ def upsert_slide_asset(
     try:
         conn.execute(
             """
-            INSERT INTO slide_assets (
+            INSERT INTO slide_artifacts (
                 slide_id, workspace_profile_id, source_id, asset_type, asset_uri,
                 asset_hash, metadata_json, created_at, updated_at
             )
@@ -767,15 +983,41 @@ def upsert_slide_asset(
         if commit:
             conn.commit()
     except sqlite3.Error as exc:
-        raise DatabaseError(f"Failed to upsert slide asset: {exc}") from exc
+        raise DatabaseError(f"Failed to upsert slide artifact: {exc}") from exc
     row = conn.execute(
         """
-        SELECT id FROM slide_assets
+        SELECT id FROM slide_artifacts
         WHERE slide_id = ? AND asset_type = ? AND asset_uri = ?
         """,
         (slide_id, asset_type, asset_uri),
     ).fetchone()
     return int(row[0])
+
+
+def upsert_slide_asset(
+    conn: sqlite3.Connection,
+    *,
+    slide_id: int,
+    asset_type: str,
+    asset_uri: str,
+    workspace_profile_id: int | None = None,
+    source_id: int | None = None,
+    asset_hash: str | None = None,
+    metadata_json: dict[str, object] | None = None,
+    commit: bool = True,
+) -> int:
+    """Compatibility wrapper for the pre-v6 artifact helper."""
+    return upsert_slide_artifact(
+        conn,
+        slide_id=slide_id,
+        asset_type=asset_type,
+        asset_uri=asset_uri,
+        workspace_profile_id=workspace_profile_id,
+        source_id=source_id,
+        asset_hash=asset_hash,
+        metadata_json=metadata_json,
+        commit=commit,
+    )
 
 
 def upsert_duplicate_group(
@@ -1099,7 +1341,7 @@ def replace_presentation_slides(
     slides: list[SlideRecord],
     *,
     commit: bool = True,
-) -> None:
+) -> SlideReplacementResult:
     """Replace all slides for a presentation, preserving IDs of existing slides.
 
     Uses the ``UNIQUE(presentation_id, slide_index)`` constraint:
@@ -1109,9 +1351,30 @@ def replace_presentation_slides(
     """
     try:
         incoming_indices = {s.slide_index for s in slides}
+        previous_rows = conn.execute(
+            """SELECT id, slide_index, title, text_content, screenshot_hash, metadata_json
+               FROM slides WHERE presentation_id = ?""",
+            (presentation_id,),
+        ).fetchall()
+        previous_by_index = {int(row[1]): row for row in previous_rows}
+        changed_ids: list[int] = []
+        new_ids: list[int] = []
 
         for slide in slides:
-            upsert_slide(conn, slide, commit=False)
+            previous = previous_by_index.get(slide.slide_index)
+            slide_id = upsert_slide(conn, slide, commit=False)
+            if previous is None:
+                new_ids.append(slide_id)
+            elif _slide_record_changed((previous[0], previous[2], previous[3], previous[4], previous[5]), slide):
+                changed_ids.append(slide_id)
+
+        removed_ids = [int(row[0]) for row in previous_rows if int(row[1]) not in incoming_indices]
+        if removed_ids:
+            removed_placeholders = ",".join("?" for _ in removed_ids)
+            conn.execute(
+                f"UPDATE slides SET canonical_slide_id = NULL WHERE canonical_slide_id IN ({removed_placeholders})",
+                removed_ids,
+            )
 
         if incoming_indices:
             placeholders = ",".join("?" for _ in incoming_indices)
@@ -1119,8 +1382,21 @@ def replace_presentation_slides(
                 f"DELETE FROM slides WHERE presentation_id = ? AND slide_index NOT IN ({placeholders})",
                 [presentation_id] + list(incoming_indices),
             )
+        elif previous_rows:
+            conn.execute("DELETE FROM slides WHERE presentation_id = ?", (presentation_id,))
+
+        if changed_ids or new_ids or removed_ids:
+            conn.execute("DELETE FROM deck_insights WHERE presentation_id = ?", (presentation_id,))
+            from ppt_lib.fts_search import remove_search_documents_for_slides
+
+            remove_search_documents_for_slides(conn, removed_ids, commit=False)
         if commit:
             conn.commit()
+        return SlideReplacementResult(
+            changed_slide_ids=tuple(sorted(changed_ids)),
+            new_slide_ids=tuple(sorted(new_ids)),
+            removed_slide_ids=tuple(sorted(removed_ids)),
+        )
     except sqlite3.Error as exc:
         raise DatabaseError(f"Failed to replace slides: {exc}") from exc
 
@@ -1180,11 +1456,20 @@ def _ensure_schema_version(
     has_v2_slide_columns = {"industry", "scenario", "origin_type"} <= cols
     has_v3_slide_columns = {"raw_text", "ai_summary", "visual_summary", "canonical_slide_id"} <= cols
     tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
-    has_v3_tables = {"library_sources", "workspace_profiles", "slide_assets", "duplicate_groups", "slide_duplicate_members"} <= tables
+    has_v3_tables = {"library_sources", "workspace_profiles", "slide_artifacts", "duplicate_groups", "slide_duplicate_members"} <= tables
     has_v4_tables = {"deck_families", "presentation_versions", "deck_insights", "slide_importance"} <= tables
+    has_v5_tables = "presentation_source_links" in tables
     needs_v2_migration = current < 2 or not has_v2_slide_columns
     needs_v3_migration = current < 3 or not has_v3_slide_columns or not has_v3_tables
     needs_v4_migration = current < 4 or not has_v4_tables
+    slide_assets_columns = {row[1] for row in conn.execute("PRAGMA table_info(slide_assets)").fetchall()}
+    slide_artifact_columns = {row[1] for row in conn.execute("PRAGMA table_info(slide_artifacts)").fetchall()}
+    needs_v5_migration = current < 5 or not has_v5_tables
+    needs_v6_migration = (
+        current < 6
+        or not {"canonical_asset_id", "labels_json"} <= slide_assets_columns
+        or not {"id", "slide_id", "asset_uri"} <= slide_artifact_columns
+    )
 
     if needs_v2_migration:
         _migrate_v1_to_v2(conn, backups_dir=backups_dir)
@@ -1192,11 +1477,77 @@ def _ensure_schema_version(
         _migrate_v2_to_v3(conn, backups_dir=backups_dir)
     if needs_v4_migration:
         _migrate_v3_to_v4(conn, backups_dir=backups_dir)
+    if needs_v5_migration:
+        _migrate_v4_to_v5(conn, backups_dir=backups_dir)
+    if needs_v6_migration:
+        if backups_dir is not None and int(conn.execute("SELECT COUNT(*) FROM slides").fetchone()[0]) > 0:
+            backup_db(conn, backups_dir)
+        from ppt_lib.migrations.schema_v6 import migrate_v5_to_v6
+
+        migrate_v5_to_v6(conn)
 
     conn.execute(
         "INSERT OR REPLACE INTO _meta (key, value) VALUES ('schema_version', ?)",
         (str(SCHEMA_VERSION),),
     )
+
+
+def _migrate_v4_to_v5(
+    conn: sqlite3.Connection,
+    *,
+    backups_dir: Path | None = None,
+) -> None:
+    presentation_count = int(conn.execute("SELECT COUNT(*) FROM presentations").fetchone()[0])
+    if presentation_count:
+        target_backups = backups_dir or _database_path(conn).parent / "backups"
+        try:
+            backup_db(conn, target_backups)
+        except DatabaseError as exc:
+            raise DatabaseError(
+                f"Migration v4→v5 aborted: pre-migration backup failed. Error: {exc}"
+            ) from exc
+    try:
+        conn.execute("BEGIN")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS presentation_source_links (
+              id INTEGER PRIMARY KEY,
+              presentation_id INTEGER NOT NULL REFERENCES presentations(id) ON DELETE CASCADE,
+              library_source_id INTEGER NOT NULL REFERENCES library_sources(id) ON DELETE CASCADE,
+              match_type TEXT NOT NULL CHECK(match_type IN ('exact','descendant','manual')),
+              linked_at TEXT NOT NULL,
+              UNIQUE(presentation_id, library_source_id)
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_presentation_source_links_presentation ON presentation_source_links(presentation_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_presentation_source_links_source ON presentation_source_links(library_source_id)"
+        )
+        backfill_presentation_source_links(conn)
+        presentation_count = int(conn.execute("SELECT COUNT(*) FROM presentations").fetchone()[0])
+        source_count = int(conn.execute("SELECT COUNT(*) FROM library_sources").fetchone()[0])
+        if presentation_count and source_count:
+            conn.execute(
+                "INSERT OR REPLACE INTO _meta (key, value) VALUES (?, ?)",
+                (SOURCE_LINK_BACKFILL_META_KEY, f"{presentation_count}:{source_count}"),
+            )
+        conn.execute("COMMIT")
+    except (sqlite3.Error, OSError) as exc:
+        try:
+            conn.execute("ROLLBACK")
+        except sqlite3.OperationalError:
+            pass
+        raise DatabaseError(f"Migration v4→v5 failed (transaction rolled back): {exc}") from exc
+
+
+def _database_path(conn: sqlite3.Connection) -> Path:
+    row = conn.execute("PRAGMA database_list").fetchone()
+    if row is None or not row[2]:
+        raise DatabaseError("Cannot determine SQLite database path for backup.")
+    return Path(row[2])
 
 
 def _migrate_v3_to_v4(
@@ -1341,8 +1692,8 @@ def _migrate_v2_to_v3(
         "CREATE INDEX IF NOT EXISTS idx_workspace_profiles_active ON workspace_profiles(is_active);",
         "CREATE INDEX IF NOT EXISTS idx_slides_profile_id ON slides(profile_id);",
         "CREATE INDEX IF NOT EXISTS idx_slides_canonical_slide_id ON slides(canonical_slide_id);",
-        "CREATE INDEX IF NOT EXISTS idx_slide_assets_slide_id ON slide_assets(slide_id);",
-        "CREATE INDEX IF NOT EXISTS idx_slide_assets_profile_id ON slide_assets(workspace_profile_id);",
+        "CREATE INDEX IF NOT EXISTS idx_slide_artifacts_slide_id ON slide_artifacts(slide_id);",
+        "CREATE INDEX IF NOT EXISTS idx_slide_artifacts_profile_id ON slide_artifacts(workspace_profile_id);",
         "CREATE INDEX IF NOT EXISTS idx_duplicate_groups_canonical ON duplicate_groups(canonical_slide_id);",
         "CREATE INDEX IF NOT EXISTS idx_slide_duplicate_members_group ON slide_duplicate_members(duplicate_group_id);",
         "CREATE INDEX IF NOT EXISTS idx_slide_duplicate_members_slide ON slide_duplicate_members(slide_id);",
@@ -1532,8 +1883,8 @@ def _ensure_extended_indexes(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_workspace_profiles_active ON workspace_profiles(is_active)",
         "CREATE INDEX IF NOT EXISTS idx_slides_profile_id ON slides(profile_id)",
         "CREATE INDEX IF NOT EXISTS idx_slides_canonical_slide_id ON slides(canonical_slide_id)",
-        "CREATE INDEX IF NOT EXISTS idx_slide_assets_slide_id ON slide_assets(slide_id)",
-        "CREATE INDEX IF NOT EXISTS idx_slide_assets_profile_id ON slide_assets(workspace_profile_id)",
+        "CREATE INDEX IF NOT EXISTS idx_slide_artifacts_slide_id ON slide_artifacts(slide_id)",
+        "CREATE INDEX IF NOT EXISTS idx_slide_artifacts_profile_id ON slide_artifacts(workspace_profile_id)",
         "CREATE INDEX IF NOT EXISTS idx_duplicate_groups_canonical ON duplicate_groups(canonical_slide_id)",
         "CREATE INDEX IF NOT EXISTS idx_slide_duplicate_members_group ON slide_duplicate_members(duplicate_group_id)",
         "CREATE INDEX IF NOT EXISTS idx_slide_duplicate_members_slide ON slide_duplicate_members(slide_id)",
@@ -1626,7 +1977,7 @@ def _create_full_asset_tables(conn: sqlite3.Connection) -> None:
         ")"
     )
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS slide_assets ("
+        "CREATE TABLE IF NOT EXISTS slide_artifacts ("
         "  id INTEGER PRIMARY KEY,"
         "  slide_id INTEGER NOT NULL REFERENCES slides(id),"
         "  workspace_profile_id INTEGER REFERENCES workspace_profiles(id),"
@@ -1739,6 +2090,19 @@ def _serialize_embedding(embedding: np.ndarray | None) -> bytes | None:
 def _validate_source(source: str) -> None:
     if source not in {"vision_model", "text_extraction", "hybrid"}:
         raise DatabaseError(f"Invalid slide source: {source}")
+
+
+def _slide_record_changed(row: sqlite3.Row | tuple[object, ...], record: SlideRecord) -> bool:
+    try:
+        stored_metadata = json.loads(str(row[4] or "{}"))
+    except (TypeError, json.JSONDecodeError):
+        stored_metadata = {}
+    return (
+        row[1] != record.title
+        or str(row[2] or "") != record.text_content
+        or row[3] != record.screenshot_hash
+        or stored_metadata != record.metadata_json
+    )
 
 
 def _validate_job_status(status: str) -> None:

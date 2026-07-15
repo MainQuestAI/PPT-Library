@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -10,8 +11,17 @@ import yaml
 from ppt_lib.settings import ConfigError, Settings, build_settings
 
 ENV_PREFIX = "PPT_LIB_"
-SENSITIVE_KEYS = {"openai_api_key", "anthropic_api_key", "vision_api_key", "paddleocr_mcp_access_token"}
+SENSITIVE_KEYS: frozenset[str] = frozenset(
+    {
+        "anthropic_api_key",
+        "embedding_api_key",
+        "openai_api_key",
+        "paddleocr_mcp_access_token",
+        "vision_api_key",
+    }
+)
 WRITABLE_CONFIG_KEYS = set(Settings.model_fields) - SENSITIVE_KEYS - {"home_dir"}
+PLAINTEXT_SECRET_WARNING_CODE = "CONFIG_PLAINTEXT_SECRET_DETECTED"
 
 
 DEFAULT_CONFIG = """# PPT Library local configuration
@@ -90,6 +100,10 @@ class ConfigCommandError(RuntimeError):
     def __init__(self, message: str, *, code: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+class ConfigSecurityWarning(UserWarning):
+    code = PLAINTEXT_SECRET_WARNING_CODE
 
 
 @dataclass(frozen=True)
@@ -253,6 +267,16 @@ def _read_config(path: Path) -> dict[str, Any]:
         return {}
     if not isinstance(raw, dict):
         raise ConfigError(f"Config file {path} must contain a mapping")
+    plaintext_secret_keys = sorted(
+        key for key in SENSITIVE_KEYS if key in raw and raw[key] is not None and raw[key] != ""
+    )
+    if plaintext_secret_keys:
+        warnings.warn(
+            f"{PLAINTEXT_SECRET_WARNING_CODE}: sensitive keys stored in config.yml: "
+            f"{', '.join(plaintext_secret_keys)}. Move them to environment variables.",
+            ConfigSecurityWarning,
+            stacklevel=2,
+        )
     return raw
 
 

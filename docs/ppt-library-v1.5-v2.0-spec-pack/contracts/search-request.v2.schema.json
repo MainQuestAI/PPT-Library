@@ -35,7 +35,40 @@
       "type": "string"
     },
     "filters": {
-      "type": "object"
+      "type": "object",
+      "properties": {
+        "industry": {
+          "$ref": "#/$defs/stringFilter"
+        },
+        "scenario": {
+          "$ref": "#/$defs/stringFilter"
+        },
+        "narrative_role": {
+          "$ref": "#/$defs/stringFilter"
+        },
+        "page_role": {
+          "$ref": "#/$defs/stringFilter"
+        },
+        "review_state": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "unreviewed",
+              "needs_review",
+              "pending",
+              "approved",
+              "rejected"
+            ]
+          }
+        },
+        "include_versions": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
     },
     "context": {
       "type": "object"
@@ -48,6 +81,17 @@
         "string",
         "null"
       ]
+    }
+  },
+  "$defs": {
+    "stringFilter": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
     }
   },
   "additionalProperties": false

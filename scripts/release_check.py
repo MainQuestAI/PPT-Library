@@ -4,13 +4,17 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
+import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
+import zipfile
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 BLOCKED_EXTENSIONS = {
@@ -37,8 +41,13 @@ PRIVATE_PATTERNS = [
     "Coding" + "-Project",
     "PPT-Library" + "-Dev",
     "zangqing" + "828",
-    "SEC" + "RET",
-    "PRIVATE" + "_KEY",
+    "SEC" + "RET=",
+    "PRIVATE" + "_KEY=",
+    "AWS_" + "SECRET_ACCESS_KEY=",
+    "-----BEGIN " + "PRIVATE KEY-----",
+    "AK" + "IA",
+    "gh" + "p_",
+    "github_" + "pat_",
     "sk" + "-proj-",
     "sk" + "-ant-",
     "壳" + "牌",
@@ -49,7 +58,34 @@ PRIVATE_PATTERNS = [
     "爱" + "帛",
     "达" + "能",
 ]
-EXPECTED_TEST_BASELINE = "1083"
+SECRET_REGEX_PATTERNS = (
+    (
+        "legacy_openai_api_key",
+        re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9]{32,}(?![A-Za-z0-9])"),
+    ),
+    (
+        "secret_assignment",
+        re.compile(
+            r"(?i)\b(?:OPENAI_API_KEY|ANTHROPIC_API_KEY|API_KEY|ACCESS_TOKEN|AUTH_TOKEN|PASSWORD)"
+            r"\s*[:=]\s*[\"']?[A-Za-z0-9+/=_-]{20,}"
+        ),
+    ),
+)
+STABLE_VERSION_PATTERN = re.compile(r"^\d+\.\d+\.\d+$")
+SDIST_ROOT_FILES = {
+    ".gitignore",
+    "CHANGELOG.md",
+    "CODE_OF_CONDUCT.md",
+    "CONTRIBUTING.md",
+    "LICENSE",
+    "README.en.md",
+    "README.md",
+    "SECURITY.md",
+    "VERSION",
+    "pyproject.toml",
+}
+SDIST_ALLOWED_PREFIXES = ("docs/", "ppt_lib/", "scripts/", "skills/", "tests/")
+UV_RUN_LOCKED = ("uv", "run", "--locked")
 
 
 @dataclass
@@ -74,7 +110,10 @@ def main() -> int:
     results.append(check_tracked_files(root))
     results.append(check_private_patterns(root))
     results.append(check_release_metadata(root))
+    version = parse_version((root / "pyproject.toml").read_text(encoding="utf-8"))
+    results.append(check_release_history(root, version))
     results.extend(run_validation_commands(root))
+    results.append(check_build_artifacts(root, version))
     results.append(run_demo_smoke(root))
 
     payload = {
@@ -156,9 +195,8 @@ def check_private_patterns(root: Path) -> CheckResult:
             text = path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             continue
-        for pattern in PRIVATE_PATTERNS:
-            if pattern in text:
-                matches.append({"file": relative, "pattern": pattern})
+        for pattern in _private_content_matches(text):
+            matches.append({"file": relative, "pattern": pattern})
     if matches:
         return CheckResult(
             "private_patterns",
@@ -167,6 +205,16 @@ def check_private_patterns(root: Path) -> CheckResult:
             details={"matches": matches[:50]},
         )
     return CheckResult("private_patterns", "pass", "No configured private patterns found in tracked text.")
+
+
+def _private_content_matches(text: str) -> list[str]:
+    matches = [pattern for pattern in PRIVATE_PATTERNS if pattern in text]
+    matches.extend(
+        label
+        for label, pattern in SECRET_REGEX_PATTERNS
+        if pattern.search(text)
+    )
+    return sorted(set(matches))
 
 
 def check_release_metadata(root: Path) -> CheckResult:
@@ -178,14 +226,10 @@ def check_release_metadata(root: Path) -> CheckResult:
     changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
     license_text = (root / "LICENSE").read_text(encoding="utf-8") if (root / "LICENSE").exists() else ""
     missing: list[str] = []
-    if version != "2.0.0":
-        missing.append("pyproject version must be 2.0.0")
+    if not version:
+        missing.append("pyproject version must be present")
     if version_file != version:
         missing.append("VERSION must match pyproject version")
-    if EXPECTED_TEST_BASELINE not in readme:
-        missing.append(f"README.md test baseline must include {EXPECTED_TEST_BASELINE}")
-    if EXPECTED_TEST_BASELINE not in readme_en:
-        missing.append(f"README.en.md test baseline must include {EXPECTED_TEST_BASELINE}")
     if 'license = "Apache-2.0"' not in pyproject:
         missing.append("pyproject license must be Apache-2.0")
     if "Apache License 2.0" not in readme or "Apache License 2.0" not in readme_en:
@@ -194,19 +238,117 @@ def check_release_metadata(root: Path) -> CheckResult:
         missing.append("LICENSE must contain Apache License 2.0 text")
     if f"[{version}]" not in changelog:
         missing.append("CHANGELOG.md must include current version")
-    if f"docs/releases/v{version}.md" not in "\n".join(git_ls_files(root)):
+    if is_stable_version(version) and f"docs/releases/v{version}.md" not in git_ls_files(root):
         missing.append(f"docs/releases/v{version}.md must exist")
     if missing:
         return CheckResult("release_metadata", "fail", "Release metadata is incomplete.", details={"missing": missing})
     return CheckResult("release_metadata", "pass", "Release metadata is consistent.", details={"version": version})
 
 
+def is_stable_version(version: str) -> bool:
+    return bool(STABLE_VERSION_PATTERN.fullmatch(version))
+
+
+def check_release_history(root: Path, version: str) -> CheckResult:
+    if not is_stable_version(version):
+        return CheckResult(
+            "release_history",
+            "pass",
+            "Development and prerelease versions do not require public/main ancestry.",
+            details={"version": version, "version_kind": "development"},
+        )
+
+    public_ref = run(["git", "rev-parse", "--verify", "public/main"], root, timeout=30, check=False)
+    if public_ref.returncode != 0:
+        return CheckResult(
+            "release_history",
+            "fail",
+            "Stable release cannot verify public/main.",
+            details={"code": "RELEASE_PUBLIC_REF_MISSING", "version": version},
+        )
+    ancestry = run(
+        ["git", "merge-base", "--is-ancestor", "public/main", "HEAD"],
+        root,
+        timeout=30,
+        check=False,
+    )
+    if ancestry.returncode != 0:
+        return CheckResult(
+            "release_history",
+            "fail",
+            "Stable release must be built from history based on public/main.",
+            details={"code": "RELEASE_WRONG_HISTORY", "version": version},
+        )
+    commit_count_result = run(
+        ["git", "rev-list", "--count", "public/main..HEAD"],
+        root,
+        timeout=30,
+        check=False,
+    )
+    commit_count = -1
+    if commit_count_result.returncode == 0:
+        try:
+            commit_count = int(commit_count_result.stdout.strip())
+        except ValueError:
+            pass
+    if commit_count not in {0, 1}:
+        return CheckResult(
+            "release_history",
+            "fail",
+            "Stable release must be a clean single-commit snapshot of public/main.",
+            details={
+                "code": "RELEASE_PRIVATE_HISTORY",
+                "version": version,
+                "commits_after_public_main": commit_count,
+            },
+        )
+    merges = run(
+        ["git", "rev-list", "--merges", "public/main..HEAD"],
+        root,
+        timeout=30,
+        check=False,
+    )
+    if merges.returncode != 0 or merges.stdout.strip():
+        return CheckResult(
+            "release_history",
+            "fail",
+            "Stable release snapshot must not contain merge commits.",
+            details={"code": "RELEASE_MERGE_HISTORY", "version": version},
+        )
+    if commit_count == 1:
+        parent = run(["git", "rev-parse", "HEAD^"], root, timeout=30, check=False)
+        if (
+            parent.returncode != 0
+            or public_ref.returncode != 0
+            or parent.stdout.strip() != public_ref.stdout.strip()
+        ):
+            return CheckResult(
+                "release_history",
+                "fail",
+                "Stable release snapshot must be a direct child of public/main.",
+                details={"code": "RELEASE_PRIVATE_HISTORY", "version": version},
+            )
+    return CheckResult(
+        "release_history",
+        "pass",
+        "Stable release is public/main or a clean single-commit snapshot.",
+        details={
+            "version": version,
+            "version_kind": "stable",
+            "commits_after_public_main": commit_count,
+        },
+    )
+
+
 def run_validation_commands(root: Path) -> list[CheckResult]:
     commands = [
-        ("pytest", ["uv", "run", "--extra", "test", "pytest"], 300),
-        ("ruff", ["uv", "run", "--extra", "lint", "ruff", "check", "."], 120),
-        ("mypy", ["uv", "run", "--extra", "lint", "mypy"], 300),
-        ("build", ["uv", "build"], 180),
+        (
+            "pytest",
+            ["uv", "run", "--locked", "--extra", "test", "--extra", "workbench", "pytest"],
+            300,
+        ),
+        ("ruff", ["uv", "run", "--locked", "--extra", "lint", "ruff", "check", "."], 120),
+        ("mypy", ["uv", "run", "--locked", "--extra", "lint", "mypy"], 300),
     ]
     results: list[CheckResult] = []
     for name, command, timeout in commands:
@@ -229,6 +371,171 @@ def run_validation_commands(root: Path) -> list[CheckResult]:
     return results
 
 
+def check_build_artifacts(root: Path, version: str) -> CheckResult:
+    with tempfile.TemporaryDirectory(prefix="ppt-lib-build-") as temp:
+        dist_dir = Path(temp)
+        build = run(
+            ["uv", "build", "--out-dir", str(dist_dir)],
+            root,
+            timeout=180,
+            check=False,
+        )
+        if build.returncode != 0:
+            return CheckResult(
+                "build_artifacts",
+                "fail",
+                "Package build failed.",
+                details={"stdout_tail": build.stdout[-4000:], "stderr_tail": build.stderr[-4000:]},
+            )
+        return check_built_artifacts(root, dist_dir, version)
+
+
+def check_built_artifacts(root: Path, dist_dir: Path, version: str) -> CheckResult:
+    sdists = sorted(dist_dir.glob("*.tar.gz"))
+    wheels = sorted(dist_dir.glob("*.whl"))
+    if len(sdists) != 1 or len(wheels) != 1:
+        return CheckResult(
+            "build_artifacts",
+            "fail",
+            "Expected exactly one sdist and one wheel.",
+            details={"sdists": [item.name for item in sdists], "wheels": [item.name for item in wheels]},
+        )
+
+    tracked = set(git_ls_files(root))
+    unexpected_members: set[str] = set()
+    blocked_members: set[str] = set()
+    private_content_matches: list[dict[str, str]] = []
+    sdist_prefix = f"ppt_library-{version}/"
+
+    with tarfile.open(sdists[0], "r:gz") as archive:
+        for member in archive.getmembers():
+            if member.isdir():
+                continue
+            name = member.name
+            if not _safe_archive_member(name) or not name.startswith(sdist_prefix):
+                blocked_members.add(name)
+                continue
+            if not member.isfile():
+                blocked_members.add(name)
+                continue
+            relative = name[len(sdist_prefix) :]
+            extracted = archive.extractfile(member)
+            if extracted is not None:
+                private_content_matches.extend(
+                    {
+                        "archive": "sdist",
+                        "member": relative,
+                        "pattern": pattern,
+                    }
+                    for pattern in _private_content_matches_bytes(extracted.read())
+                )
+            if relative == "PKG-INFO":
+                continue
+            if not _allowed_sdist_member(relative):
+                blocked_members.add(relative)
+            elif relative not in tracked:
+                unexpected_members.add(relative)
+
+    wheel_dist_info_prefix = f"ppt_library-{version}.dist-info/"
+    with zipfile.ZipFile(wheels[0]) as archive:
+        for info in archive.infolist():
+            name = info.filename
+            if name.endswith("/"):
+                continue
+            if not _safe_archive_member(name):
+                blocked_members.add(name)
+                continue
+            if stat.S_ISLNK(info.external_attr >> 16):
+                blocked_members.add(name)
+                continue
+            private_content_matches.extend(
+                {
+                    "archive": "wheel",
+                    "member": name,
+                    "pattern": pattern,
+                }
+                for pattern in _private_content_matches_bytes(archive.read(info))
+            )
+            if name.startswith(wheel_dist_info_prefix):
+                continue
+            if not name.startswith("ppt_lib/"):
+                blocked_members.add(name)
+            elif name not in tracked:
+                unexpected_members.add(name)
+
+    if unexpected_members or blocked_members or private_content_matches:
+        return CheckResult(
+            "build_artifacts",
+            "fail",
+            "Built artifacts contain untracked, disallowed, or sensitive content.",
+            details={
+                "unexpected_members": sorted(unexpected_members),
+                "blocked_members": sorted(blocked_members),
+                "private_content_matches": private_content_matches[:50],
+                "sdist": sdists[0].name,
+                "wheel": wheels[0].name,
+            },
+        )
+    return CheckResult(
+        "build_artifacts",
+        "pass",
+        "Built sdist and wheel contain only tracked allowlisted files, generated metadata, and no configured sensitive content.",
+        details={"sdist": sdists[0].name, "wheel": wheels[0].name},
+    )
+
+
+def check_coverage_report(
+    report_path: Path,
+    *,
+    minimum_statement_percent: float = 80.0,
+    minimum_branch_percent: float = 65.0,
+) -> CheckResult:
+    try:
+        payload = json.loads(report_path.read_text(encoding="utf-8"))
+        totals = payload["totals"]
+        covered_statements = int(totals["covered_lines"])
+        statement_count = int(totals["num_statements"])
+        covered_branches = int(totals["covered_branches"])
+        branch_count = int(totals["num_branches"])
+    except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+        return CheckResult(
+            "coverage",
+            "fail",
+            "Coverage JSON is missing or invalid.",
+            details={"code": "COVERAGE_REPORT_INVALID", "error": str(exc)},
+        )
+
+    statement_percent = 100.0 if statement_count == 0 else covered_statements / statement_count * 100
+    branch_percent = 100.0 if branch_count == 0 else covered_branches / branch_count * 100
+    details = {
+        "statement_percent": round(statement_percent, 2),
+        "minimum_statement_percent": minimum_statement_percent,
+        "branch_percent": round(branch_percent, 2),
+        "minimum_branch_percent": minimum_branch_percent,
+    }
+    if statement_percent < minimum_statement_percent or branch_percent < minimum_branch_percent:
+        return CheckResult(
+            "coverage",
+            "fail",
+            "Coverage is below the required statement or branch threshold.",
+            details={"code": "COVERAGE_GATE_FAILED", **details},
+        )
+    return CheckResult("coverage", "pass", "Statement and branch coverage thresholds passed.", details=details)
+
+
+def _safe_archive_member(name: str) -> bool:
+    path = PurePosixPath(name)
+    return not path.is_absolute() and ".." not in path.parts
+
+
+def _allowed_sdist_member(relative: str) -> bool:
+    return relative in SDIST_ROOT_FILES or relative.startswith(SDIST_ALLOWED_PREFIXES)
+
+
+def _private_content_matches_bytes(payload: bytes) -> list[str]:
+    return _private_content_matches(payload.decode("utf-8", errors="ignore"))
+
+
 def run_demo_smoke(root: Path) -> CheckResult:
     with tempfile.TemporaryDirectory(prefix="ppt-lib-release-check-") as temp:
         temp_path = Path(temp)
@@ -238,11 +545,10 @@ def run_demo_smoke(root: Path) -> CheckResult:
         review_pack_path = home_dir / "review-pack.jsonl"
         env = os.environ | {"PPT_LIB_EMBEDDING_PROVIDER": "fake", "PPT_LIB_VISION_PROVIDER": "text_extraction"}
         commands = [
-            ["uv", "run", "--extra", "demo", "python", "scripts/create_demo_decks.py", "--output", str(decks_dir)],
-            ["uv", "run", "ppt-lib", "--home-dir", str(home_dir), "setup", "--quick", "--non-interactive"],
+            [*UV_RUN_LOCKED, "--extra", "demo", "python", "scripts/create_demo_decks.py", "--output", str(decks_dir)],
+            [*UV_RUN_LOCKED, "ppt-lib", "--home-dir", str(home_dir), "setup", "--quick", "--non-interactive"],
             [
-                "uv",
-                "run",
+                *UV_RUN_LOCKED,
                 "ppt-lib",
                 "--home-dir",
                 str(home_dir),
@@ -256,8 +562,7 @@ def run_demo_smoke(root: Path) -> CheckResult:
                 "json",
             ],
             [
-                "uv",
-                "run",
+                *UV_RUN_LOCKED,
                 "ppt-lib",
                 "--home-dir",
                 str(home_dir),
@@ -268,15 +573,14 @@ def run_demo_smoke(root: Path) -> CheckResult:
                 "--output",
                 "json",
             ],
-            ["uv", "run", "ppt-lib", "--home-dir", str(home_dir), "sources", "scan", "--dry-run", "--output", "json"],
-            ["uv", "run", "ppt-lib", "--home-dir", str(home_dir), "sources", "scan", "--apply", "--output", "json"],
-            ["uv", "run", "ppt-lib", "--home-dir", str(home_dir), "index", "--from-sources"],
-            ["uv", "run", "ppt-lib", "--home-dir", str(home_dir), "enrich-decks", "--pending", "--limit", "20", "--output", "json"],
-            ["uv", "run", "ppt-lib", "--home-dir", str(home_dir), "insights", "key-pages", "--output", "json"],
-            ["uv", "run", "ppt-lib", "--home-dir", str(home_dir), "insights", "review-pack", "--output", str(review_pack_path)],
+            [*UV_RUN_LOCKED, "ppt-lib", "--home-dir", str(home_dir), "sources", "scan", "--dry-run", "--output", "json"],
+            [*UV_RUN_LOCKED, "ppt-lib", "--home-dir", str(home_dir), "sources", "scan", "--apply", "--output", "json"],
+            [*UV_RUN_LOCKED, "ppt-lib", "--home-dir", str(home_dir), "index", "--from-sources"],
+            [*UV_RUN_LOCKED, "ppt-lib", "--home-dir", str(home_dir), "enrich-decks", "--pending", "--limit", "20", "--output", "json"],
+            [*UV_RUN_LOCKED, "ppt-lib", "--home-dir", str(home_dir), "insights", "key-pages", "--output", "json"],
+            [*UV_RUN_LOCKED, "ppt-lib", "--home-dir", str(home_dir), "insights", "review-pack", "--output", str(review_pack_path)],
             [
-                "uv",
-                "run",
+                *UV_RUN_LOCKED,
                 "ppt-lib",
                 "--home-dir",
                 str(home_dir),
@@ -309,8 +613,7 @@ def run_demo_smoke(root: Path) -> CheckResult:
             first = key_pages["items"][0]
             usage = run(
                 [
-                    "uv",
-                    "run",
+                    *UV_RUN_LOCKED,
                     "ppt-lib",
                     "--home-dir",
                     str(home_dir),
@@ -329,8 +632,7 @@ def run_demo_smoke(root: Path) -> CheckResult:
             assert_no_errors(["record-usage"], parse_json(usage.stdout))
             search = run(
                 [
-                    "uv",
-                    "run",
+                    *UV_RUN_LOCKED,
                     "ppt-lib",
                     "--home-dir",
                     str(home_dir),

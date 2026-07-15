@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -18,6 +18,8 @@ class RoleSelection:
     role: str
     slides: list[SearchResult]
     gap: bool
+    beat_id: str | None = None
+    page_task_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -39,6 +41,7 @@ def select_slides(
     max_per_role: int = 3,
     ranking: str = "classic",
     threshold: float = 0.0,
+    scope: str = "all",
 ) -> SelectionReport:
     _validate_roles(roles)
     if max_per_role < 1:
@@ -56,13 +59,13 @@ def select_slides(
 
     try:
         for role in roles:
-            if not _role_has_rows(conn, role):
+            if not _role_has_rows(conn, role, scope=scope):
                 gaps.append(role)
-                selections.append(RoleSelection(role=role, slides=[], gap=True))
+                selections.append(RoleSelection(role=role, slides=[], gap=True, beat_id=role, page_task_id=role))
                 continue
             if provider is None:
                 provider = build_embedding_provider(settings)
-            candidate_limit = _candidate_limit(conn, role, max_per_role, industry=industry)
+            candidate_limit = _candidate_limit(conn, role, max_per_role, industry=industry, scope=scope)
             results = search(
                 query,
                 SearchOptions(
@@ -70,6 +73,7 @@ def select_slides(
                     threshold=threshold,
                     ranking=ranking,  # type: ignore[arg-type]
                     narrative_role=role,
+                    scope=scope,  # type: ignore[arg-type]
                 ),
                 settings,
                 conn=conn,
@@ -80,14 +84,14 @@ def select_slides(
                 results = results[:max_per_role]
             if not results:
                 gaps.append(role)
-            selections.append(RoleSelection(role=role, slides=results, gap=not results))
+            selections.append(RoleSelection(role=role, slides=results, gap=not results, beat_id=role, page_task_id=role))
             total_slides += len(results)
     finally:
         conn.close()
 
     return SelectionReport(
         query=query,
-        options={"roles": roles, "industry": industry, "ranking": ranking, "max_per_role": max_per_role},
+        options={"roles": roles, "industry": industry, "ranking": ranking, "max_per_role": max_per_role, "scope": scope},
         roles=selections,
         total_slides=total_slides,
         gaps=gaps,
@@ -103,6 +107,7 @@ def select_slides_from_plan(
     max_per_role: int = 3,
     ranking: str = "classic",
     threshold: float = 0.0,
+    scope: str = "all",
 ) -> SelectionReport:
     """Select slides from a narrative-plan.json file.
 
@@ -119,6 +124,7 @@ def select_slides_from_plan(
                 max_per_role=max_per_role,
                 ranking=ranking,
                 threshold=threshold,
+                scope=scope,
             )
         elif "roles" in payload:
             roles = payload["roles"]
@@ -137,6 +143,7 @@ def select_slides_from_plan(
         max_per_role=max_per_role,
         ranking=ranking,
         threshold=threshold,
+        scope=scope,
     )
 
 
@@ -184,14 +191,56 @@ def record_selection_usage(
     return count
 
 
-def _role_has_rows(conn, role: str) -> bool:
+def record_assembled_usage(
+    settings: Settings,
+    slide_ids: list[int],
+    *,
+    deal_id: int,
+) -> int:
+    """Record usage in actual output order after assembly succeeds."""
+    assert settings.db_path is not None
+    conn = connect(settings.db_path)
+    init_db(conn)
+    count = 0
+    try:
+        for position, slide_id in enumerate(slide_ids, start=1):
+            row = conn.execute(
+                "SELECT presentation_id FROM slides WHERE id = ?",
+                (slide_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"Cannot record usage for unknown slide id: {slide_id}")
+            record_slide_usage(
+                conn,
+                slide_id=slide_id,
+                deal_id=deal_id,
+                deck_presentation_id=int(row[0]),
+                position=position,
+                commit=False,
+            )
+            count += 1
+        conn.commit()
+    finally:
+        conn.close()
+    return count
+
+
+def _role_has_rows(conn, role: str, *, scope: str = "all") -> bool:
+    active_filter = "" if scope == "all" else """
+      AND EXISTS (
+        SELECT 1 FROM presentation_source_links psl
+        JOIN library_sources ls ON ls.id = psl.library_source_id
+        WHERE psl.presentation_id = slides.presentation_id AND ls.is_active = 1
+      )
+    """
     row = conn.execute(
-        """
+        f"""
         SELECT 1
         FROM slides
         WHERE embedding IS NOT NULL
           AND narrative_role = ?
           AND (origin_type IS NULL OR origin_type != 'assembled_output')
+          {active_filter}
         LIMIT 1
         """,
         (role,),
@@ -199,16 +248,24 @@ def _role_has_rows(conn, role: str) -> bool:
     return row is not None
 
 
-def _candidate_limit(conn, role: str, max_per_role: int, *, industry: str | None) -> int:
+def _candidate_limit(conn, role: str, max_per_role: int, *, industry: str | None, scope: str = "all") -> int:
     if not industry:
         return max_per_role
+    active_filter = "" if scope == "all" else """
+      AND EXISTS (
+        SELECT 1 FROM presentation_source_links psl
+        JOIN library_sources ls ON ls.id = psl.library_source_id
+        WHERE psl.presentation_id = slides.presentation_id AND ls.is_active = 1
+      )
+    """
     row = conn.execute(
-        """
+        f"""
         SELECT COUNT(*)
         FROM slides
         WHERE embedding IS NOT NULL
           AND narrative_role = ?
           AND (origin_type IS NULL OR origin_type != 'assembled_output')
+          {active_filter}
         """,
         (role,),
     ).fetchone()
@@ -224,6 +281,7 @@ def _select_slides_from_beats(
     max_per_role: int,
     ranking: str,
     threshold: float,
+    scope: str = "all",
 ) -> SelectionReport:
     if not isinstance(beats_payload, list) or not beats_payload:
         raise ValueError("Plan beats must be a non-empty list.")
@@ -249,8 +307,16 @@ def _select_slides_from_beats(
             max_per_role=max_per_role,
             ranking=ranking,
             threshold=threshold,
+            scope=scope,
         )
-        selections.extend(report.roles)
+        beat_id = _beat_identifier(beat, role=role, index=len(roles))
+        page_task_id = beat.get("page_task_id")
+        if not isinstance(page_task_id, str) or not page_task_id.strip():
+            page_task_id = beat_id
+        selections.extend(
+            replace(selection, beat_id=beat_id, page_task_id=page_task_id)
+            for selection in report.roles
+        )
         gaps.extend(report.gaps)
         total_slides += report.total_slides
 
@@ -265,6 +331,14 @@ def _select_slides_from_beats(
         gaps=gaps,
         timestamp=datetime.now(UTC).isoformat(),
     )
+
+
+def _beat_identifier(beat: dict[str, object], *, role: str, index: int) -> str:
+    for key in ("beat_id", "id"):
+        value = beat.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return role or f"beat_{index + 1}"
 
 
 def _parse_topn_strategy(strategy: str) -> int | None:

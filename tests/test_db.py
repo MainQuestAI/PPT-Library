@@ -36,7 +36,7 @@ from ppt_lib.db import (
     upsert_library_source,
     upsert_presentation,
     upsert_slide,
-    upsert_slide_asset,
+    upsert_slide_artifact,
 )
 
 
@@ -58,7 +58,7 @@ def test_init_db_creates_schema(tmp_path: Path) -> None:
 
     assert {"_meta", "presentations", "slides", "screenshots", "index_jobs",
             "deals", "assemble_runs", "slide_usage", "slide_lineage",
-            "library_sources", "workspace_profiles", "slide_assets",
+            "library_sources", "workspace_profiles", "slide_assets", "slide_artifacts",
             "duplicate_groups", "slide_duplicate_members", "deck_families",
             "presentation_versions", "deck_insights", "slide_importance"} <= tables
 
@@ -692,7 +692,7 @@ def test_slide_asset_and_duplicate_canonical_roundtrip(tmp_path: Path) -> None:
         slide_id=duplicate_id,
     )
 
-    asset_id = upsert_slide_asset(
+    asset_id = upsert_slide_artifact(
         conn,
         slide_id=canonical_id,
         asset_type="embedding",
@@ -708,7 +708,7 @@ def test_slide_asset_and_duplicate_canonical_roundtrip(tmp_path: Path) -> None:
     assert canonical_row[0] == canonical_id
 
     rows = conn.execute(
-        "SELECT slide_id, asset_type FROM slide_assets WHERE id = ?", (asset_id,)
+        "SELECT slide_id, asset_type FROM slide_artifacts WHERE id = ?", (asset_id,)
     ).fetchone()
     assert rows == (canonical_id, "embedding")
 
@@ -1130,3 +1130,139 @@ def test_replace_presentation_slides_preserves_slide_ids(tmp_path: Path) -> None
     # Verify that slide_usage FK still works (sid_0 still exists)
     usage = conn.execute("SELECT slide_id FROM slide_usage WHERE slide_id = ?", (sid_0,)).fetchone()
     assert usage is not None, "slide_usage referencing sid_0 should survive"
+
+
+def test_replace_changed_slide_invalidates_machine_derived_state(tmp_path: Path) -> None:
+    conn = initialized_conn(tmp_path)
+    presentation_id = upsert_presentation(
+        conn,
+        PresentationRecord(tmp_path / "deck.pptx", "deck.pptx", None, 1, "h", 1, 1.0),
+    )
+    original = SlideRecord(
+        presentation_id, 0, "Old", "old body", np.ones(4, dtype=np.float32), None,
+        "text_extraction", [], {},
+    )
+    slide_id = upsert_slide(conn, original)
+    update_slide_summary_fields(
+        conn,
+        slide_id,
+        raw_text="old body",
+        ai_summary="old summary",
+        visual_summary="old visual",
+        summary_status="ok",
+    )
+    conn.execute(
+        "INSERT INTO deck_insights (presentation_id, status, summary_json) VALUES (?, 'ok', '{}')",
+        (presentation_id,),
+    )
+    conn.execute(
+        "INSERT INTO slide_importance (slide_id, importance_score, status) VALUES (?, 0.8, 'ok')",
+        (slide_id,),
+    )
+    conn.commit()
+
+    replacement = SlideRecord(
+        presentation_id, 0, "New", "new body", np.zeros(4, dtype=np.float32), None,
+        "text_extraction", [], {},
+    )
+    change = replace_presentation_slides(conn, presentation_id, [replacement])
+
+    row = conn.execute(
+        "SELECT ai_summary, visual_summary, summary_status FROM slides WHERE id = ?",
+        (slide_id,),
+    ).fetchone()
+    assert row == (None, None, "pending")
+    assert change.changed_slide_ids == (slide_id,)
+    assert conn.execute("SELECT COUNT(*) FROM deck_insights").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM slide_importance").fetchone()[0] == 0
+    embedding_blob = conn.execute("SELECT embedding FROM slides WHERE id = ?", (slide_id,)).fetchone()[0]
+    np.testing.assert_array_equal(np.frombuffer(embedding_blob, dtype=np.float32), np.zeros(4, dtype=np.float32))
+    assert conn.execute("SELECT body_text, ai_summary FROM slides_fts WHERE legacy_slide_id = ?", (str(slide_id),)).fetchone() == (
+        "new body",
+        "",
+    )
+
+
+def test_replace_unchanged_slide_preserves_summary(tmp_path: Path) -> None:
+    conn = initialized_conn(tmp_path)
+    presentation_id = upsert_presentation(
+        conn,
+        PresentationRecord(tmp_path / "deck.pptx", "deck.pptx", None, 1, "h", 1, 1.0),
+    )
+    slide = SlideRecord(
+        presentation_id, 0, "Title", "body", np.ones(4, dtype=np.float32), None,
+        "text_extraction", [], {},
+    )
+    slide_id = upsert_slide(conn, slide)
+    update_slide_summary_fields(conn, slide_id, ai_summary="keep", summary_status="ok")
+
+    change = replace_presentation_slides(conn, presentation_id, [slide])
+
+    assert change.changed_slide_ids == ()
+    assert conn.execute("SELECT ai_summary, summary_status FROM slides WHERE id = ?", (slide_id,)).fetchone() == ("keep", "ok")
+
+
+def test_replace_changed_slide_preserves_unchanged_sibling_importance(tmp_path: Path) -> None:
+    conn = initialized_conn(tmp_path)
+    presentation_id = upsert_presentation(
+        conn,
+        PresentationRecord(tmp_path / "deck.pptx", "deck.pptx", None, 2, "h", 1, 1.0),
+    )
+    changed = SlideRecord(
+        presentation_id, 0, "Changed", "old", np.ones(4, dtype=np.float32), None,
+        "text_extraction", [], {},
+    )
+    unchanged = SlideRecord(
+        presentation_id, 1, "Unchanged", "keep", np.ones(4, dtype=np.float32), None,
+        "text_extraction", [], {},
+    )
+    changed_id = upsert_slide(conn, changed)
+    unchanged_id = upsert_slide(conn, unchanged)
+    conn.execute(
+        "INSERT INTO slide_importance (slide_id, importance_score, status) VALUES (?, 0.7, 'ok')",
+        (changed_id,),
+    )
+    conn.execute(
+        "INSERT INTO slide_importance (slide_id, importance_score, status) VALUES (?, 0.9, 'ok')",
+        (unchanged_id,),
+    )
+    conn.commit()
+
+    replacement = SlideRecord(
+        presentation_id, 0, "Changed", "new", np.zeros(4, dtype=np.float32), None,
+        "text_extraction", [], {},
+    )
+    replace_presentation_slides(conn, presentation_id, [replacement, unchanged])
+
+    assert conn.execute(
+        "SELECT slide_id, importance_score FROM slide_importance ORDER BY slide_id"
+    ).fetchall() == [(unchanged_id, 0.9)]
+
+
+def test_replace_all_slides_detaches_external_canonical_reference(tmp_path: Path) -> None:
+    conn = initialized_conn(tmp_path)
+    first_presentation = upsert_presentation(
+        conn,
+        PresentationRecord(tmp_path / "first.pptx", "first.pptx", None, 1, "a", 1, 1.0),
+    )
+    second_presentation = upsert_presentation(
+        conn,
+        PresentationRecord(tmp_path / "second.pptx", "second.pptx", None, 1, "b", 1, 1.0),
+    )
+    vector = np.ones(4, dtype=np.float32)
+    canonical_id = upsert_slide(
+        conn,
+        SlideRecord(first_presentation, 0, "Canonical", "a", vector, None, "text_extraction", [], {}),
+    )
+    duplicate_id = upsert_slide(
+        conn,
+        SlideRecord(second_presentation, 0, "Duplicate", "b", vector, None, "text_extraction", [], {}),
+    )
+    conn.execute("UPDATE slides SET canonical_slide_id = ? WHERE id = ?", (canonical_id, duplicate_id))
+    conn.commit()
+
+    result = replace_presentation_slides(conn, first_presentation, [])
+
+    assert result.removed_slide_ids == (canonical_id,)
+    assert conn.execute("SELECT COUNT(*) FROM slides WHERE id = ?", (canonical_id,)).fetchone()[0] == 0
+    assert conn.execute("SELECT canonical_slide_id FROM slides WHERE id = ?", (duplicate_id,)).fetchone()[0] is None

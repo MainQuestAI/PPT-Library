@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import urllib.error
 from pathlib import Path
 
 import pytest
 
+from ppt_lib.db import SCHEMA_VERSION
 from ppt_lib.services.capability_service import (
     CapabilityReport,
     ProviderStatus,
@@ -27,15 +29,16 @@ class TestCapabilityService:
         report = detect_capabilities(settings)
         assert isinstance(report, CapabilityReport)
         assert report.contract == "ppt_library.capabilities.v1"
-        assert report.db_schema_version == 5
+        assert report.db_schema_version == SCHEMA_VERSION
         assert "local" in report.modes
 
     def test_report_includes_all_contracts(self):
         settings = Settings()
         report = detect_capabilities(settings)
-        assert "capabilities.v1" in report.contracts
-        assert "search-response.v2" in report.contracts
-        assert len(report.contracts) == 7
+        assert "ppt_library.capabilities.v1" in report.contracts
+        assert "ppt_library.search_response.v2" in report.contracts
+        assert "deck_master_ppt_library_selection.v1" in report.contracts
+        assert len(report.contracts) == 10
 
     def test_embedding_providers_detected(self):
         settings = Settings()
@@ -66,7 +69,9 @@ class TestCapabilityService:
         settings = Settings()
         report = detect_capabilities(settings)
         # v2.0: these capabilities are now implemented
-        assert report.features["workbench"] is True
+        assert isinstance(report.features["workbench"], bool)
+        assert report.features["selection.deck_master_v1"] is True
+        assert report.features["fts5_search"] is True
         assert report.features["ft5_search"] is True
         assert report.features["asset_identity"] is True
         assert report.features["job_engine"] is True
@@ -74,6 +79,57 @@ class TestCapabilityService:
         # not yet deployed
         assert report.features["server_mode"] is False
         assert report.features["ann_search"] is False
+
+    def test_workbench_capability_tracks_optional_dependencies(self, monkeypatch):
+        from ppt_lib.services import capability_service
+
+        monkeypatch.setattr(
+            capability_service.importlib.util,
+            "find_spec",
+            lambda name: object() if name == "fastapi" else None,
+        )
+
+        report = detect_capabilities(Settings())
+
+        assert report.features["workbench"] is False
+
+    def test_probe_false_does_not_contact_configured_endpoint(self, monkeypatch):
+        from ppt_lib.services import capability_service
+
+        def fail_if_called(*args, **kwargs):
+            raise AssertionError("probe should not run")
+
+        monkeypatch.setattr(capability_service.urllib.request, "urlopen", fail_if_called)
+        settings = Settings(
+            embedding_provider="lmstudio",
+            lmstudio_base_url="http://127.0.0.1:1234/v1",
+        )
+
+        report = detect_capabilities(settings, probe_providers=False)
+        provider = next(item for item in report.providers["embedding"] if item.name == "lmstudio")
+
+        assert provider.available is True
+        assert provider.reason == "Configured; live probe not requested"
+
+    def test_probe_true_marks_dead_endpoint_unavailable(self, monkeypatch):
+        from ppt_lib.services import capability_service
+
+        def dead_endpoint(*args, **kwargs):
+            raise urllib.error.URLError("connection refused")
+
+        monkeypatch.setattr(capability_service.urllib.request, "urlopen", dead_endpoint)
+        settings = Settings(
+            embedding_provider="lmstudio",
+            lmstudio_base_url="http://127.0.0.1:1234/v1",
+            vision_provider="text",
+        )
+
+        report = detect_capabilities(settings, probe_providers=True)
+        provider = next(item for item in report.providers["embedding"] if item.name == "lmstudio")
+
+        assert provider.available is False
+        assert provider.reason is not None
+        assert "connection refused" in provider.reason
 
     def test_to_json(self):
         settings = Settings()
@@ -193,10 +249,11 @@ class TestCapabilitiesCLI:
             capture_output=True,
             text=True,
         )
-        assert result.returncode == 0
+        assert result.returncode == 1
         data = json.loads(result.stdout)
         assert data["valid"] is False
         assert len(data["errors"]) > 0
+        assert data["_errors"][0]["code"] == "CONTRACT_VALIDATION_FAILED"
 
     def test_contract_validate_file_input(self, tmp_path: Path):
         payload = {

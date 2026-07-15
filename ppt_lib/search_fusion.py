@@ -7,12 +7,13 @@ multiple retrieval backends into a single ranked candidate list.
 from __future__ import annotations
 
 import sqlite3
+import time
 from dataclasses import dataclass
 
 import numpy as np
 
 from ppt_lib.fts_search import LexicalSearchResult, lexical_search
-from ppt_lib.vector_backend import SqliteScanBackend, VectorBackend, VectorSearchResult
+from ppt_lib.vector_backend import SqliteScanBackend, VectorBackend, VectorBackendStatus, VectorSearchResult
 
 # Default RRF constant (Cormack et al.)
 DEFAULT_RRF_K = 60
@@ -42,6 +43,18 @@ class FusedCandidate:
             "title": self.title,
             "snippet": self.snippet,
         }
+
+
+@dataclass(frozen=True)
+class HybridSearchRun:
+    candidates: list[FusedCandidate]
+    lexical_results: list[LexicalSearchResult]
+    vector_results: list[VectorSearchResult]
+    lexical_duration_ms: int
+    vector_duration_ms: int
+    fusion_duration_ms: int
+    vector_status: VectorBackendStatus
+    fallback_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -146,18 +159,20 @@ def reciprocal_rank_fusion(
         lex_info = lexical_map.get(slide_id)
         vec_info = vector_map.get(slide_id)
 
-        candidates.append(FusedCandidate(
-            slide_id=slide_id,
-            fused_score=fused_score,
-            lexical_rank=lex_info[0] if lex_info else None,
-            lexical_score=lex_info[1].score if lex_info else None,
-            vector_rank=vec_info[0] if vec_info else None,
-            vector_score=vec_info[1].score if vec_info else None,
-            title=lex_info[1].title if lex_info else None,
-            snippet=lex_info[1].snippet if lex_info else "",
-        ))
+        candidates.append(
+            FusedCandidate(
+                slide_id=slide_id,
+                fused_score=fused_score,
+                lexical_rank=lex_info[0] if lex_info else None,
+                lexical_score=lex_info[1].score if lex_info else None,
+                vector_rank=vec_info[0] if vec_info else None,
+                vector_score=vec_info[1].score if vec_info else None,
+                title=lex_info[1].title if lex_info else None,
+                snippet=lex_info[1].snippet if lex_info else "",
+            )
+        )
 
-    candidates.sort(key=lambda c: c.fused_score, reverse=True)
+    candidates.sort(key=lambda c: (-c.fused_score, c.slide_id))
     return candidates
 
 
@@ -174,30 +189,77 @@ def hybrid_search(
 
     If query_embedding is None, falls back to lexical-only search.
     """
+    return run_hybrid_search(
+        conn,
+        query,
+        query_embedding,
+        profile=profile,
+        top_k=top_k,
+        vector_backend=vector_backend,
+    ).candidates
+
+
+def run_hybrid_search(
+    conn: sqlite3.Connection,
+    query: str,
+    query_embedding: np.ndarray | None = None,
+    *,
+    profile: SearchProfile | None = None,
+    top_k: int = 10,
+    vector_backend: VectorBackend | None = None,
+) -> HybridSearchRun:
     profile = profile or DEFAULT_PROFILE
+    lexical_top_k = max(profile.lexical_top_k, top_k)
+    vector_top_k = max(profile.vector_top_k, top_k)
 
     # Lexical recall
+    lexical_started = time.monotonic()
     lexical_results = lexical_search(
-        conn, query,
-        top_k=profile.lexical_top_k,
+        conn,
+        query,
+        top_k=lexical_top_k,
     )
+    lexical_duration_ms = int((time.monotonic() - lexical_started) * 1000)
 
     # Vector recall
     vector_results: list[VectorSearchResult] = []
+    backend = vector_backend or SqliteScanBackend(conn)
+    vector_status = backend.get_status()
+    vector_duration_ms = 0
+    fallback_reason: str | None = None
     if query_embedding is not None:
-        backend = vector_backend or SqliteScanBackend(conn)
         if backend.is_available():
-            vector_results = backend.search(
-                query_embedding,
-                top_k=profile.vector_top_k,
-                min_score=profile.min_score,
-            )
+            vector_started = time.monotonic()
+            try:
+                vector_results = backend.search(
+                    query_embedding,
+                    top_k=vector_top_k,
+                    min_score=profile.min_score,
+                )
+            except (sqlite3.Error, ValueError, TypeError) as exc:
+                fallback_reason = f"{type(exc).__name__}: {exc}"
+            vector_duration_ms = int((time.monotonic() - vector_started) * 1000)
+        else:
+            fallback_reason = "vector backend unavailable"
+    else:
+        fallback_reason = "query embedding unavailable"
 
     # Fuse
+    fusion_started = time.monotonic()
     candidates = reciprocal_rank_fusion(
         lexical_results,
         vector_results,
         k=profile.rrf_k,
     )
+    fusion_duration_ms = int((time.monotonic() - fusion_started) * 1000)
 
-    return candidates[:top_k]
+    return HybridSearchRun(
+        candidates=candidates[:top_k],
+        lexical_results=lexical_results,
+        vector_results=vector_results,
+        lexical_duration_ms=lexical_duration_ms,
+        vector_duration_ms=vector_duration_ms,
+        fusion_duration_ms=fusion_duration_ms,
+        vector_status=vector_status,
+        fallback_reason=fallback_reason,
+    )

@@ -13,6 +13,7 @@ from ppt_lib.asset_release_gate import (
     run_asset_intelligence_gate,
 )
 from ppt_lib.asset_schema import create_asset_schema_tables
+from ppt_lib.db import connect, init_db
 
 
 def _create_full_db() -> sqlite3.Connection:
@@ -52,6 +53,15 @@ class TestAssetIntelligenceGate:
         assert isinstance(gate, AssetIntelligenceGate)
         # Some checks should fail without full schema
         assert gate.fail_count > 0
+
+    def test_gate_accepts_real_v6_asset_role_tables(self, tmp_path: Path):
+        conn = connect(tmp_path / "index.db")
+        init_db(conn)
+
+        gate = run_asset_intelligence_gate(conn)
+
+        role_check = next(check for check in gate.checks if check["name"] == "asset_roles_separated")
+        assert role_check["passed"] is True
 
 
 class TestExportAssetPack:

@@ -1,6 +1,6 @@
 [project]
 name = "ppt-library"
-version = "2.0.0"
+version = "2.0.1.dev0"
 description = "Local-first CLI for indexing, searching, reviewing, and reusing PPTX slide assets with AI agents."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -20,6 +20,8 @@ classifiers = [
 ]
 dependencies = [
   "defusedxml>=0.7.1",
+  "filelock>=3.16",
+  "jsonschema>=4.23",
   "numpy>=2.0",
   "pydantic>=2.8",
   "PyYAML>=6.0",
@@ -29,6 +31,7 @@ dependencies = [
 [project.optional-dependencies]
 test = [
   "pytest>=8.0",
+  "pytest-cov>=6.0",
 ]
 lint = [
   "mypy>=1.10",
@@ -43,7 +46,12 @@ paddleocr = [
 workbench = [
   "fastapi>=0.110",
   "uvicorn>=0.29",
+  "httpx>=0.27",
   "httpx2>=0.6",
+]
+security = [
+  "bandit>=1.8",
+  "pip-audit>=2.9",
 ]
 
 [project.scripts]
@@ -55,11 +63,29 @@ Repository = "https://github.com/MainQuestAI/PPT-Library"
 Issues = "https://github.com/MainQuestAI/PPT-Library/issues"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling==1.31.0"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["ppt_lib"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/CHANGELOG.md",
+  "/CODE_OF_CONDUCT.md",
+  "/CONTRIBUTING.md",
+  "/LICENSE",
+  "/README.en.md",
+  "/README.md",
+  "/SECURITY.md",
+  "/VERSION",
+  "/docs",
+  "/ppt_lib",
+  "/pyproject.toml",
+  "/scripts",
+  "/skills",
+  "/tests",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

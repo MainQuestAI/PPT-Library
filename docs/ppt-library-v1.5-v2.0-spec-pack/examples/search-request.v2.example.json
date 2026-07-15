@@ -12,6 +12,9 @@
     "page_role": [
       "architecture"
     ],
+    "review_state": [
+      "approved"
+    ],
     "include_versions": false
   },
   "context": {

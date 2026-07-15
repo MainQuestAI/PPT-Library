@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ppt-library.local/contracts/readiness.v1.schema.json",
+  "title": "PPT Library Readiness v1",
+  "type": "object",
+  "required": [
+    "schema_version", "runtime_ready", "contract_ready", "semantic_search_ready",
+    "semantic_provider_status", "role_selection_ready", "preview_status",
+    "business_ranking_status", "data_hygiene_status", "overall_status",
+    "active_corpus", "business_signals", "reason_codes"
+  ],
+  "properties": {
+    "schema_version": {"const": "ppt_library_readiness.v1"},
+    "runtime_ready": {"type": "boolean"},
+    "contract_ready": {"type": "boolean"},
+    "semantic_search_ready": {"type": "boolean"},
+    "semantic_provider_status": {"enum": ["configured", "verified", "unavailable"]},
+    "role_selection_ready": {"type": "boolean"},
+    "preview_status": {"enum": ["ready", "degraded", "missing"]},
+    "business_ranking_status": {"enum": ["ready", "cold_start"]},
+    "data_hygiene_status": {"enum": ["clean", "degraded", "blocked"]},
+    "overall_status": {"enum": ["ready", "degraded_ready", "blocked"]},
+    "active_corpus": {"$ref": "#/$defs/active_corpus"},
+    "business_signals": {"$ref": "#/$defs/business_signals"},
+    "reason_codes": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "uniqueItems": true
+    }
+  },
+  "$defs": {
+    "active_corpus": {
+      "type": "object",
+      "required": [
+        "source_count", "presentation_count", "slide_count",
+        "valid_embedding_count", "invalid_embedding_count", "retrievable_slide_count",
+        "preview_ready_count", "preview_coverage", "role_minimum",
+        "role_counts", "failed_job_count", "orphan_presentation_count"
+      ],
+      "properties": {
+        "source_count": {"type": "integer", "minimum": 0},
+        "presentation_count": {"type": "integer", "minimum": 0},
+        "slide_count": {"type": "integer", "minimum": 0},
+        "valid_embedding_count": {"type": "integer", "minimum": 0},
+        "invalid_embedding_count": {"type": "integer", "minimum": 0},
+        "retrievable_slide_count": {"type": "integer", "minimum": 0},
+        "preview_ready_count": {"type": "integer", "minimum": 0},
+        "preview_coverage": {"type": "number", "minimum": 0, "maximum": 1},
+        "role_minimum": {"type": "integer", "minimum": 1},
+        "role_counts": {"$ref": "#/$defs/role_counts"},
+        "failed_job_count": {"type": "integer", "minimum": 0},
+        "orphan_presentation_count": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "role_counts": {
+      "type": "object",
+      "required": ["opener", "problem", "solution", "architecture", "case", "roi", "cta", "appendix"],
+      "properties": {
+        "opener": {"type": "integer", "minimum": 0},
+        "problem": {"type": "integer", "minimum": 0},
+        "solution": {"type": "integer", "minimum": 0},
+        "architecture": {"type": "integer", "minimum": 0},
+        "case": {"type": "integer", "minimum": 0},
+        "roi": {"type": "integer", "minimum": 0},
+        "cta": {"type": "integer", "minimum": 0},
+        "appendix": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "business_signals": {
+      "type": "object",
+      "required": ["deals_with_outcome", "usage_count", "deal_minimum", "usage_minimum"],
+      "properties": {
+        "deals_with_outcome": {"type": "integer", "minimum": 0},
+        "usage_count": {"type": "integer", "minimum": 0},
+        "deal_minimum": {"type": "integer", "minimum": 1},
+        "usage_minimum": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

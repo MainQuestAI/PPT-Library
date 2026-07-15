@@ -58,6 +58,8 @@ class AssembleSlideReport:
     status: str
     risk_level: str
     warnings: list[str]
+    source_slide_id: int | None = None
+    risk_policy: str = DEFAULT_RISK_POLICY
 
 
 @dataclass(frozen=True)
@@ -67,6 +69,8 @@ class SkippedSlideReport:
     status: str
     reason: str
     warnings: list[str]
+    source_slide_id: int | None = None
+    risk_policy: str = DEFAULT_RISK_POLICY
 
 
 @dataclass(frozen=True)
@@ -169,6 +173,7 @@ def run_assemble(manifest: AssembleManifest) -> AssembleReport:
         report = _assemble_report(
             manifest=manifest,
             copied_slides=copied_slides,
+            copied_specs=active_manifest.slides,
             skipped_slides=skipped_slides,
             report_path=report_path,
             fatal_errors=[],
@@ -209,23 +214,33 @@ def _assemble_report(
     *,
     manifest: AssembleManifest,
     copied_slides: list[CopiedSlide],
+    copied_specs: list[AssembleSlideSpec] | None = None,
     skipped_slides: list[SkippedSlideReport] | None = None,
     report_path: Path,
     fatal_errors: list[str],
     fidelity: AssembleFidelityReport | None = None,
 ) -> AssembleReport:
-    slide_reports = [_slide_report(slide) for slide in copied_slides]
+    report_errors = list(fatal_errors)
+    specs = copied_specs or []
+    if copied_slides and len(copied_slides) != len(specs):
+        report_errors.append(
+            "copy_result_mismatch: copied slide count does not match active manifest slide count."
+        )
+    slide_reports = [
+        _slide_report(slide, specs[index] if index < len(specs) else None)
+        for index, slide in enumerate(copied_slides)
+    ]
     skipped_reports = skipped_slides or []
     fidelity_report = fidelity or _empty_fidelity_report()
     return AssembleReport(
         schema_version=manifest.schema_version,
         run_id=_run_id(),
-        status=_aggregate_status(slide_reports, skipped_reports, fatal_errors, fidelity_report.warnings),
+        status=_aggregate_status(slide_reports, skipped_reports, report_errors, fidelity_report.warnings),
         output_path=manifest.output_path,
         slide_count=len(slide_reports),
         slides=slide_reports,
         skipped_slides=skipped_reports,
-        errors=fatal_errors,
+        errors=report_errors,
         fidelity=fidelity_report,
         report_path=report_path,
     )
@@ -298,6 +313,8 @@ def _skip_unrenderable_slides(manifest: AssembleManifest) -> tuple[AssembleManif
                     status="skipped",
                     reason="render_preflight_failed",
                     warnings=warnings,
+                    source_slide_id=slide.source_slide_id,
+                    risk_policy=slide.risk_policy,
                 )
             )
             continue
@@ -374,7 +391,7 @@ def _render_screenshots(pptx_path: Path, output_dir: Path, *, label: str) -> _Re
     return _RenderResult(len(results), warnings)
 
 
-def _slide_report(slide: CopiedSlide) -> AssembleSlideReport:
+def _slide_report(slide: CopiedSlide, spec: AssembleSlideSpec | None) -> AssembleSlideReport:
     return AssembleSlideReport(
         output_page_number=slide.output_page_number,
         source_file=str(slide.source_file),
@@ -382,6 +399,8 @@ def _slide_report(slide: CopiedSlide) -> AssembleSlideReport:
         status=slide.status,
         risk_level=_risk_level(slide.risk_tags),
         warnings=slide.warnings,
+        source_slide_id=spec.source_slide_id if spec else None,
+        risk_policy=spec.risk_policy if spec else DEFAULT_RISK_POLICY,
     )
 
 
@@ -407,6 +426,8 @@ def _aggregate_status(
     if any(slide.status != "copied" for slide in slides):
         return "partial"
     if any(slide.risk_level != "low" for slide in slides):
+        return "needs_manual_review"
+    if any(slide.risk_policy == "manual_review_required" for slide in slides):
         return "needs_manual_review"
     if fidelity_warnings:
         return "needs_manual_review"
@@ -440,6 +461,8 @@ def _report_to_json(report: AssembleReport) -> dict[str, object]:
                 "status": slide.status,
                 "risk_level": slide.risk_level,
                 "warnings": slide.warnings,
+                "source_slide_id": slide.source_slide_id,
+                "risk_policy": slide.risk_policy,
             }
             for slide in report.slides
         ],
@@ -450,6 +473,8 @@ def _report_to_json(report: AssembleReport) -> dict[str, object]:
                 "status": slide.status,
                 "reason": slide.reason,
                 "warnings": slide.warnings,
+                "source_slide_id": slide.source_slide_id,
+                "risk_policy": slide.risk_policy,
             }
             for slide in report.skipped_slides
         ],

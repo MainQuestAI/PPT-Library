@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import zipfile
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from ppt_lib.config import load_settings
@@ -92,6 +94,9 @@ def test_index_single_pptx_roundtrip_records(tmp_path: Path, monkeypatch: pytest
     metadata = conn.execute("SELECT metadata_json FROM slides").fetchone()[0]
     assert '"provider": "fake"' in metadata
     assert '"dimensions": 1536' in metadata
+    assert conn.execute("SELECT COUNT(*) FROM asset_identity_map WHERE legacy_slide_id IS NOT NULL").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM slide_assets").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM slides_fts").fetchone()[0] == 1
 
 
 def test_index_batch_scans_nested_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -190,6 +195,56 @@ def test_incremental_skips_unchanged(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert second.status == "skipped"
 
 
+@pytest.mark.parametrize(
+    "changed_settings",
+    [
+        {"embedding_provider": "openai"},
+        {"embedding_model": "model-b"},
+        {"embedding_dimensions": 8},
+    ],
+)
+def test_incremental_reindexes_when_embedding_signature_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    changed_settings: dict[str, object],
+) -> None:
+    home = tmp_path / "home"
+    config_path = home / "config.yml"
+    base_settings: dict[str, object] = {
+        "home_dir": home,
+        "embedding_provider": "fake",
+        "embedding_model": "model-a",
+        "embedding_dimensions": 4,
+    }
+    first_settings = load_settings(base_settings, config_path=config_path)
+    second_settings = load_settings({**base_settings, **changed_settings}, config_path=config_path)
+    pptx = make_pptx(tmp_path / "source" / "deck.pptx")
+    patch_index_dependencies(monkeypatch, tmp_path / "slide.png")
+
+    def build_configured_provider(settings):
+        provider = FakeEmbeddingProvider(settings.embedding_dimensions)
+        provider.model = settings.embedding_model
+        return provider
+
+    monkeypatch.setattr("ppt_lib.indexer.build_embedding_provider", build_configured_provider)
+
+    first = index_file(pptx, first_settings)
+    second = index_file(pptx, second_settings)
+
+    assert first.status == "indexed"
+    assert second.status == "indexed"
+    conn = connect(second_settings.db_path)
+    embedding_blob, metadata_json = conn.execute(
+        "SELECT embedding, metadata_json FROM slides"
+    ).fetchone()
+    assert np.frombuffer(embedding_blob, dtype=np.float32).size == second_settings.embedding_dimensions
+    assert json.loads(metadata_json)["embedding"] == {
+        "provider": second_settings.embedding_provider,
+        "model": second_settings.embedding_model,
+        "dimensions": second_settings.embedding_dimensions,
+    }
+
+
 def test_full_reindexes_unchanged_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     settings = load_settings({"home_dir": tmp_path / "home", "embedding_provider": "fake"}, config_path=tmp_path / "home" / "config.yml")
     pptx = make_pptx(tmp_path / "source" / "deck.pptx")
@@ -212,6 +267,14 @@ def test_incremental_reindexes_changed_hash(tmp_path: Path, monkeypatch: pytest.
     second = index_file(pptx, settings)
 
     assert second.status == "indexed"
+
+    conn = connect(settings.db_path)
+    mappings = conn.execute(
+        "SELECT slide_revision_id, legacy_slide_id FROM asset_identity_map ORDER BY updated_at"
+    ).fetchall()
+    assert len(mappings) == 2
+    assert sum(1 for _revision, legacy_id in mappings if legacy_id is not None) == 1
+    assert conn.execute("SELECT body_text FROM slides_fts").fetchone()[0] == "new"
 
 
 def test_incremental_reindexes_changed_size(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

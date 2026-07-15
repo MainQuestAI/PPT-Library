@@ -6,14 +6,17 @@ from pathlib import Path
 import pytest
 
 from ppt_lib.evaluation import (
+    EvaluationManifest,
     EvaluationManifestError,
     EvaluationQuery,
     SearchEvaluationSummary,
+    calibrate_search_thresholds,
     calibrate_threshold_results,
     load_evaluation_manifest,
     score_query_results,
 )
 from ppt_lib.searcher import SearchResult
+from ppt_lib.settings import Settings
 
 
 def test_load_evaluation_manifest_requires_queries(tmp_path: Path) -> None:
@@ -178,6 +181,32 @@ def test_calibrate_threshold_results_falls_back_to_best_recall() -> None:
 
     assert calibrated["recommended_threshold"] == 0.35
     assert calibrated["target_met"] is False
+
+
+def test_calibration_runs_production_search_for_each_threshold(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(home_dir=tmp_path, embedding_provider="fake")
+    manifest = EvaluationManifest(
+        version="1.0",
+        queries=[EvaluationQuery(id="q1", query="CMS", expected_title_keywords=["CMS"])],
+        thresholds=[0.0, 0.5, 0.8],
+    )
+    observed_thresholds: list[float] = []
+
+    monkeypatch.setattr("ppt_lib.evaluation.load_search_rows", lambda conn, dimensions: [])
+
+    def fake_search(query, options, settings, **kwargs):
+        observed_thresholds.append(options.threshold)
+        return [_result(1, "CMS", "/tmp/cms.pptx")] if options.threshold < 0.8 else []
+
+    monkeypatch.setattr("ppt_lib.evaluation.search", fake_search)
+
+    calibrated = calibrate_search_thresholds(manifest, settings)
+
+    assert observed_thresholds == [0.0, 0.5, 0.8]
+    assert calibrated["recommended_threshold"] == 0.5
 
 
 def _result(slide_id: int, title: str, source_file: str, summary: str = "summary") -> SearchResult:

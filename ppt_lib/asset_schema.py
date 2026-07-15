@@ -165,91 +165,82 @@ class HealthFinding:
 # ---------------------------------------------------------------------------
 
 
-def create_asset_schema_tables(conn: sqlite3.Connection) -> None:
-    """Create v1.7 asset schema tables (schema version 6)."""
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS slide_assets (
-            canonical_asset_id TEXT PRIMARY KEY,
-            asset_type TEXT NOT NULL DEFAULT 'slide',
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            labels_json TEXT DEFAULT '{}'
-        );
+ASSET_SCHEMA_STATEMENTS: tuple[str, ...] = (
+    """CREATE TABLE IF NOT EXISTS slide_assets (
+        canonical_asset_id TEXT PRIMARY KEY,
+        asset_type TEXT NOT NULL DEFAULT 'slide',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        labels_json TEXT DEFAULT '{}'
+    )""",
+    """CREATE TABLE IF NOT EXISTS slide_revisions (
+        slide_revision_id TEXT PRIMARY KEY,
+        canonical_asset_id TEXT NOT NULL
+            REFERENCES slide_assets(canonical_asset_id) ON DELETE CASCADE,
+        fingerprint TEXT NOT NULL,
+        algorithm_version TEXT NOT NULL,
+        text_hash TEXT NOT NULL DEFAULT '',
+        visual_hash TEXT,
+        layout_hash TEXT,
+        created_at TEXT NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS lineage_edges (
+        edge_id TEXT PRIMARY KEY,
+        source_asset_id TEXT NOT NULL,
+        target_asset_id TEXT NOT NULL,
+        edge_type TEXT NOT NULL,
+        confidence REAL NOT NULL DEFAULT 1.0,
+        source TEXT NOT NULL DEFAULT 'auto',
+        created_at TEXT NOT NULL,
+        metadata_json TEXT DEFAULT '{}'
+    )""",
+    """CREATE TABLE IF NOT EXISTS classification_values (
+        asset_id TEXT NOT NULL,
+        field_name TEXT NOT NULL,
+        value TEXT NOT NULL,
+        confidence REAL NOT NULL DEFAULT 1.0,
+        source TEXT NOT NULL DEFAULT 'deterministic',
+        review_state TEXT NOT NULL DEFAULT 'pending',
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (asset_id, field_name, source)
+    )""",
+    """CREATE TABLE IF NOT EXISTS feedback_events (
+        event_id TEXT PRIMARY KEY,
+        asset_id TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        reason TEXT,
+        context_json TEXT DEFAULT '{}',
+        created_at TEXT NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS health_findings (
+        finding_id TEXT PRIMARY KEY,
+        asset_id TEXT NOT NULL,
+        severity TEXT NOT NULL,
+        finding_type TEXT NOT NULL,
+        message TEXT NOT NULL,
+        suggested_action TEXT,
+        state TEXT NOT NULL DEFAULT 'open',
+        created_at TEXT NOT NULL,
+        resolved_at TEXT
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_revisions_canonical ON slide_revisions(canonical_asset_id)",
+    "CREATE INDEX IF NOT EXISTS idx_lineage_source ON lineage_edges(source_asset_id)",
+    "CREATE INDEX IF NOT EXISTS idx_lineage_target ON lineage_edges(target_asset_id)",
+    "CREATE INDEX IF NOT EXISTS idx_lineage_type ON lineage_edges(edge_type)",
+    "CREATE INDEX IF NOT EXISTS idx_classification_asset ON classification_values(asset_id)",
+    "CREATE INDEX IF NOT EXISTS idx_feedback_asset ON feedback_events(asset_id)",
+    "CREATE INDEX IF NOT EXISTS idx_health_asset ON health_findings(asset_id)",
+    "CREATE INDEX IF NOT EXISTS idx_health_state ON health_findings(state)",
+    "CREATE INDEX IF NOT EXISTS idx_health_severity ON health_findings(severity)",
+)
 
-        CREATE TABLE IF NOT EXISTS slide_revisions (
-            slide_revision_id TEXT PRIMARY KEY,
-            canonical_asset_id TEXT NOT NULL REFERENCES slide_assets(canonical_asset_id),
-            fingerprint TEXT NOT NULL,
-            algorithm_version TEXT NOT NULL,
-            text_hash TEXT NOT NULL DEFAULT '',
-            visual_hash TEXT,
-            layout_hash TEXT,
-            created_at TEXT NOT NULL
-        );
 
-        CREATE TABLE IF NOT EXISTS lineage_edges (
-            edge_id TEXT PRIMARY KEY,
-            source_asset_id TEXT NOT NULL,
-            target_asset_id TEXT NOT NULL,
-            edge_type TEXT NOT NULL,
-            confidence REAL NOT NULL DEFAULT 1.0,
-            source TEXT NOT NULL DEFAULT 'auto',
-            created_at TEXT NOT NULL,
-            metadata_json TEXT DEFAULT '{}'
-        );
-
-        CREATE TABLE IF NOT EXISTS classification_values (
-            asset_id TEXT NOT NULL,
-            field_name TEXT NOT NULL,
-            value TEXT NOT NULL,
-            confidence REAL NOT NULL DEFAULT 1.0,
-            source TEXT NOT NULL DEFAULT 'deterministic',
-            review_state TEXT NOT NULL DEFAULT 'pending',
-            created_at TEXT NOT NULL,
-            PRIMARY KEY (asset_id, field_name, source)
-        );
-
-        CREATE TABLE IF NOT EXISTS feedback_events (
-            event_id TEXT PRIMARY KEY,
-            asset_id TEXT NOT NULL,
-            event_type TEXT NOT NULL,
-            reason TEXT,
-            context_json TEXT DEFAULT '{}',
-            created_at TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS health_findings (
-            finding_id TEXT PRIMARY KEY,
-            asset_id TEXT NOT NULL,
-            severity TEXT NOT NULL,
-            finding_type TEXT NOT NULL,
-            message TEXT NOT NULL,
-            suggested_action TEXT,
-            state TEXT NOT NULL DEFAULT 'open',
-            created_at TEXT NOT NULL,
-            resolved_at TEXT
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_revisions_canonical
-            ON slide_revisions(canonical_asset_id);
-        CREATE INDEX IF NOT EXISTS idx_lineage_source
-            ON lineage_edges(source_asset_id);
-        CREATE INDEX IF NOT EXISTS idx_lineage_target
-            ON lineage_edges(target_asset_id);
-        CREATE INDEX IF NOT EXISTS idx_lineage_type
-            ON lineage_edges(edge_type);
-        CREATE INDEX IF NOT EXISTS idx_classification_asset
-            ON classification_values(asset_id);
-        CREATE INDEX IF NOT EXISTS idx_feedback_asset
-            ON feedback_events(asset_id);
-        CREATE INDEX IF NOT EXISTS idx_health_asset
-            ON health_findings(asset_id);
-        CREATE INDEX IF NOT EXISTS idx_health_state
-            ON health_findings(state);
-        CREATE INDEX IF NOT EXISTS idx_health_severity
-            ON health_findings(severity);
-    """)
-    conn.commit()
+def create_asset_schema_tables(conn: sqlite3.Connection, *, commit: bool = True) -> None:
+    """Create the canonical asset schema without forcing an outer transaction to commit."""
+    for statement in ASSET_SCHEMA_STATEMENTS:
+        conn.execute(statement)
+    if commit:
+        conn.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -263,6 +254,7 @@ def upsert_slide_asset(
     *,
     asset_type: str = "slide",
     labels: dict[str, str] | None = None,
+    commit: bool = True,
 ) -> SlideAsset:
     """Insert or update a slide asset."""
     import json
@@ -277,7 +269,8 @@ def upsert_slide_asset(
                labels_json = excluded.labels_json""",
         (canonical_asset_id, asset_type, now, now, labels_json),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
     cursor = conn.cursor()
     cursor.execute(
@@ -298,6 +291,8 @@ def upsert_slide_asset(
 def insert_slide_revision(
     conn: sqlite3.Connection,
     revision: SlideRevision,
+    *,
+    commit: bool = True,
 ) -> None:
     """Insert a slide revision."""
     conn.execute(
@@ -316,7 +311,8 @@ def insert_slide_revision(
             revision.created_at,
         ),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def add_lineage_edge(

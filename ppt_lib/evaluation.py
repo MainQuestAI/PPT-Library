@@ -144,17 +144,19 @@ def calibrate_search_thresholds(
     init_db(conn)
     try:
         rows = load_search_rows(conn, settings.embedding_dimensions)
-        base_results = {
-            item.id: search(item.query, SearchOptions(top_k=top_k, threshold=0.0), settings, conn=conn, rows=rows)
-            for item in manifest.queries
-        }
         threshold_reports: list[tuple[float, SearchEvaluationSummary]] = []
         full_reports: list[dict[str, object]] = []
         for threshold in manifest.thresholds:
             query_results = [
                 score_query_results(
                     item,
-                    [result for result in base_results[item.id] if result.score >= threshold],
+                    search(
+                        item.query,
+                        SearchOptions(top_k=top_k, threshold=threshold),
+                        settings,
+                        conn=conn,
+                        rows=rows,
+                    ),
                     top_k=top_k,
                 )
                 for item in manifest.queries

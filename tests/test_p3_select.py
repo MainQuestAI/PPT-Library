@@ -18,6 +18,7 @@ from ppt_lib.db import (
     upsert_slide,
 )
 from ppt_lib.selector import (
+    RoleSelection,
     SelectionReport,
     record_selection_usage,
     select_slides,
@@ -121,6 +122,33 @@ def test_select_slides_from_plan_beats_format(tmp_path: Path, monkeypatch) -> No
     assert "roi" in report.gaps
 
 
+def test_select_slides_from_plan_keeps_identity_after_invalid_middle_beat(tmp_path: Path, monkeypatch) -> None:
+    _seed_slide(tmp_path, "opener_a", "opener")
+    _seed_slide(tmp_path, "case_a", "case")
+    settings = load_settings({"home_dir": tmp_path, "embedding_provider": "fake"}, config_path=tmp_path / "config.yml")
+    monkeypatch.setattr("ppt_lib.selector.build_embedding_provider", lambda s: StaticProvider(np.ones(1536)))
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text(
+        json.dumps(
+            {
+                "beats": [
+                    {"beat_id": "beat-1", "page_task_id": "page-1", "role": "opener"},
+                    {"beat_id": "beat-invalid", "brief": "missing role"},
+                    {"beat_id": "beat-3", "page_task_id": "page-3", "role": "case"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = select_slides_from_plan(settings, plan_path=plan_path, max_per_role=1)
+
+    assert [(item.beat_id, item.page_task_id) for item in report.roles] == [
+        ("beat-1", "page-1"),
+        ("beat-3", "page-3"),
+    ]
+
+
 def test_select_slides_from_plan_invalid_format(tmp_path: Path) -> None:
     settings = load_settings({"home_dir": tmp_path, "embedding_provider": "fake"}, config_path=tmp_path / "config.yml")
     plan_path = tmp_path / "bad.json"
@@ -219,7 +247,7 @@ def test_cli_select_slides_deck_master_contract_output_file(tmp_path: Path, monk
         "ppt_lib.cli.select_slides_from_plan",
         lambda settings, **kwargs: SelectionReport(
             query="from plan", options={"roles": ["opener"]},
-            roles=[RoleSelection("opener", [], True)],
+            roles=[RoleSelection("opener", [], True, beat_id="beat-001", page_task_id="page-001")],
             total_slides=0, gaps=["opener"],
             timestamp="2026-05-25T00:00:00+00:00",
         ),
@@ -249,6 +277,48 @@ def test_cli_select_slides_deck_master_contract_output_file(tmp_path: Path, monk
     assert data["selections"][0]["beat_id"] == "beat-001"
     assert data["selections"][0]["page_task_id"] == "page-001"
     assert data["selections"][0]["candidates"] == []
+
+
+def test_cli_deck_master_contract_uses_selection_identity_without_rereading_plan(tmp_path: Path, monkeypatch, capsys) -> None:
+    from ppt_lib.cli import main
+
+    monkeypatch.setattr(
+        "ppt_lib.cli.select_slides_from_plan",
+        lambda settings, **kwargs: SelectionReport(
+            query="from plan",
+            options={"roles": ["opener", "case"]},
+            roles=[
+                RoleSelection("opener", [], True, beat_id="beat-1", page_task_id="page-1"),
+                RoleSelection("case", [], True, beat_id="beat-3", page_task_id="page-3"),
+            ],
+            total_slides=0,
+            gaps=["opener", "case"],
+            timestamp="2026-07-13T00:00:00+00:00",
+        ),
+    )
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text(
+        json.dumps(
+            {
+                "beats": [
+                    {"beat_id": "beat-1", "role": "opener"},
+                    {"beat_id": "beat-invalid"},
+                    {"beat_id": "beat-3", "role": "case"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = main([
+        "--home-dir", str(tmp_path), "select-slides", "--plan", str(plan_file),
+        "--contract", "deck-master.v1", "--run-id", "dm-run",
+    ])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert [item["beat_id"] for item in payload["selections"]] == ["beat-1", "beat-3"]
+    assert [item["page_task_id"] for item in payload["selections"]] == ["page-1", "page-3"]
 
 
 def test_cli_select_slides_deck_master_contract_requires_run_id(tmp_path: Path, capsys) -> None:

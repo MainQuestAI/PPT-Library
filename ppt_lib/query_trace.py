@@ -182,12 +182,14 @@ class TraceBuilder:
         query: str,
         profile_name: str,
         profile_version: str,
+        *,
+        request_id: str | None = None,
     ) -> None:
         self._query = query
         self._profile_name = profile_name
         self._profile_version = profile_version
         self._trace_id = new_trace_id()
-        self._request_id = new_request_id()
+        self._request_id = request_id or new_request_id()
         self._start_time = time.monotonic()
         self._lexical_trace: LexicalBackendTrace | None = None
         self._vector_trace: VectorBackendTrace | None = None

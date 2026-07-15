@@ -4,6 +4,8 @@ import json
 import sqlite3
 from pathlib import Path
 
+from ppt_lib.fts_search import fts_tables_exist, index_from_slides
+
 
 class MetadataJsonlError(RuntimeError):
     pass
@@ -42,6 +44,8 @@ def import_metadata_jsonl(conn: sqlite3.Connection, path: Path) -> dict[str, obj
             continue
         imported += 1
         updated_slide_ids.append(slide_id)
+    if updated_slide_ids and fts_tables_exist(conn):
+        index_from_slides(conn, slide_ids=sorted(set(updated_slide_ids)), commit=False)
     conn.commit()
     return {"imported": imported, "skipped": skipped, "updated_slide_ids": updated_slide_ids}
 

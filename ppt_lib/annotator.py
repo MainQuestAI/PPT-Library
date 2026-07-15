@@ -8,6 +8,7 @@ import sqlite3
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from ppt_lib.fts_search import fts_tables_exist, index_from_slides
 from ppt_lib.labels import INDUSTRY_LABELS, NARRATIVE_ROLES, SCENARIO_LABELS
 from ppt_lib.settings import Settings
 
@@ -198,12 +199,16 @@ def load_unannotated_slides(
 def write_annotations(conn: sqlite3.Connection, results: Sequence[AnnotationResult]) -> int:
     """Write annotation results back to slides table. Returns count of updated rows."""
     updated = 0
+    updated_slide_ids: list[int] = []
     for r in results:
         conn.execute(
             "UPDATE slides SET narrative_role = ?, industry = ?, scenario = ? WHERE id = ?",
             (r.narrative_role, r.industry, r.scenario, r.slide_id),
         )
         updated += 1
+        updated_slide_ids.append(r.slide_id)
+    if updated_slide_ids and fts_tables_exist(conn):
+        index_from_slides(conn, slide_ids=sorted(set(updated_slide_ids)), commit=False)
     conn.commit()
     return updated
 

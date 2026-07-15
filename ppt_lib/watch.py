@@ -11,7 +11,7 @@ from pathlib import Path
 from types import FrameType
 from typing import Any, Literal, Protocol, cast
 
-from ppt_lib.indexer import ErrorRecord
+from ppt_lib.indexer import ErrorRecord, IndexResult
 from ppt_lib.settings import Settings
 
 try:
@@ -103,9 +103,10 @@ def is_pptx_candidate(path: Path) -> bool:
 def wait_until_file_stable(path: Path, interval_seconds: int = 2, attempts: int = 3) -> bool:
     previous: tuple[int, float] | None = None
     for _ in range(attempts):
-        if not path.exists():
+        try:
+            stat = path.stat()
+        except OSError:
             return False
-        stat = path.stat()
         current = (stat.st_size, stat.st_mtime)
         if previous == current:
             return True
@@ -117,12 +118,13 @@ def wait_until_file_stable(path: Path, interval_seconds: int = 2, attempts: int 
 
 def process_events_once(
     queue: WatchQueue,
-    index_callback: Callable[[Path], object],
+    index_callback: Callable[[Path], IndexResult | object],
 ) -> list[ErrorRecord]:
     errors: list[ErrorRecord] = []
     for path in queue.pop_all():
         try:
-            index_callback(path)
+            result = index_callback(path)
+            errors.extend(_index_result_errors(path, result))
         except Exception as exc:
             errors.append(
                 ErrorRecord(
@@ -160,7 +162,7 @@ class WatchService:
         self,
         root: Path,
         settings: Settings,
-        index_callback: Callable[[Path], object],
+        index_callback: Callable[[Path], IndexResult | object],
         *,
         queue: WatchQueue | None = None,
         observer_factory: Callable[[], _ObserverLike] | None = None,
@@ -224,7 +226,8 @@ class WatchService:
                 self.queue.requeue_unstable(item)
                 continue
             try:
-                self.index_callback(item.path)
+                result = self.index_callback(item.path)
+                batch_errors.extend(_index_result_errors(item.path, result))
             except Exception as exc:
                 batch_errors.append(
                     ErrorRecord(
@@ -290,8 +293,12 @@ class WatchService:
             signal.signal(signal.SIGINT, self._old_sigint_handler)
 
 
-def watch_directory(root: Path, settings: Settings, index_callback: Callable[[Path], object]) -> None:
-    WatchService(root, settings, index_callback).run()
+def watch_directory(
+    root: Path,
+    settings: Settings,
+    index_callback: Callable[[Path], IndexResult | object],
+) -> list[ErrorRecord]:
+    return WatchService(root, settings, index_callback).run()
 
 
 def now_event(path: Path, event_type: Literal["created", "modified", "moved"]) -> WatchEvent:
@@ -300,3 +307,20 @@ def now_event(path: Path, event_type: Literal["created", "modified", "moved"]) -
 
 def _normalize_path(path: Path) -> Path:
     return path.expanduser().resolve(strict=False)
+
+
+def _index_result_errors(path: Path, result: object) -> list[ErrorRecord]:
+    if not isinstance(result, IndexResult):
+        return []
+    if result.status != "failed" and not result.errors:
+        return []
+    messages = [item.message for item in result.errors] or [f"Index returned status '{result.status}'."]
+    return [
+        ErrorRecord(
+            code="WATCH_INDEX_FAILED",
+            message=f"{path}: {message}",
+            source_module="watch",
+            severity="warning",
+        )
+        for message in messages
+    ]

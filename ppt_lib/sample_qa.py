@@ -23,10 +23,18 @@ from ppt_lib.settings import Settings
 SamplePhase = Literal["baseline", "complex", "all"]
 SAMPLE_MANIFEST_ENV = "PPT_LIB_SAMPLE_MANIFEST"
 DEFAULT_SAMPLE_MANIFEST_PATH = Path(".gstack/local-sample-manifest.json")
+QA_HOME_SENTINEL = ".ppt-library-sample-qa-home"
+QA_HOME_SENTINEL_CONTENT = "ppt-library-sample-qa:v1\n"
 
 
 class SampleQaManifestError(RuntimeError):
     pass
+
+
+class SampleQaSafetyError(RuntimeError):
+    def __init__(self, message: str, *, code: str = "QA_FRESH_HOME_NOT_OWNED") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 @dataclass(frozen=True)
@@ -513,9 +521,28 @@ def _error_to_text(error: ErrorRecord) -> str:
 
 
 def _reset_generated_home(home_dir: Path) -> None:
-    root = home_dir.expanduser().resolve(strict=False)
+    expanded_root = home_dir.expanduser()
+    if expanded_root.is_symlink():
+        raise SampleQaSafetyError(f"Refusing to reset symlinked sample QA home: {expanded_root}")
+    root = expanded_root.resolve(strict=False)
+    production_home = (Path.home() / ".ppt-library").resolve(strict=False)
+    if root == production_home:
+        raise SampleQaSafetyError(f"Refusing to reset the primary PPT Library home: {root}")
     if not root.exists():
+        root.mkdir(parents=True, exist_ok=False)
+        (root / QA_HOME_SENTINEL).write_text(QA_HOME_SENTINEL_CONTENT, encoding="utf-8")
         return
+    if not root.is_dir():
+        raise SampleQaSafetyError(f"Sample QA home is not a directory: {root}")
+    sentinel = root / QA_HOME_SENTINEL
+    if sentinel.is_symlink() or not sentinel.is_file():
+        raise SampleQaSafetyError(f"Refusing to reset unowned sample QA home without a valid sentinel: {root}")
+    try:
+        sentinel_content = sentinel.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise SampleQaSafetyError(f"Cannot read sample QA home sentinel: {sentinel}") from exc
+    if sentinel_content != QA_HOME_SENTINEL_CONTENT:
+        raise SampleQaSafetyError(f"Refusing to reset sample QA home with an invalid sentinel: {root}")
     for name in [
         "config.yml",
         "index.db",
@@ -528,7 +555,9 @@ def _reset_generated_home(home_dir: Path) -> None:
         "backups",
     ]:
         target = root / name
-        if target.is_dir():
+        if target.is_symlink():
+            target.unlink()
+        elif target.is_dir():
             shutil.rmtree(target)
         elif target.exists():
             target.unlink()

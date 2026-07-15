@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import sqlite3
 
+import numpy as np
+
+from ppt_lib.db import PresentationRecord, SlideRecord, connect, init_db, upsert_presentation, upsert_slide
 from ppt_lib.fts_search import (
     LexicalSearchResult,
     SearchDocument,
@@ -76,6 +79,31 @@ class TestSearchDocument:
 
 
 class TestIndexing:
+    def test_real_init_db_indexes_real_slide_columns(self, tmp_path) -> None:
+        conn = connect(tmp_path / "index.db")
+        init_db(conn)
+        presentation_id = upsert_presentation(
+            conn,
+            PresentationRecord(tmp_path / "deck.pptx", "deck.pptx", None, 1, "h", 1, 1.0),
+        )
+        upsert_slide(
+            conn,
+            SlideRecord(
+                presentation_id,
+                0,
+                "Architecture",
+                "cloud architecture architecture",
+                np.ones(4, dtype=np.float32),
+                None,
+                "text_extraction",
+                [],
+                {},
+            ),
+        )
+
+        assert index_from_slides(conn) == 1
+        assert lexical_search(conn, "architecture")[0].slide_id == 1
+
     def test_index_single_document(self):
         conn = _create_db()
         create_fts_tables(conn)

@@ -9,11 +9,11 @@
 ```text
 ppt-library/
   SKILL.md
-  agents/
-    openai.yaml
   references/
     agent-adapters.md
 ```
+
+展示名称、描述和版本统一写在 `SKILL.md` frontmatter 中。
 
 不要把 `.gstack/`、真实 PPT、样本清单、截图、QA 报告、API key 或本地凭据一起复制。
 
@@ -35,8 +35,9 @@ ppt-library/
 所有宿主都必须保留这些规则：
 
 - `ppt-lib` 是唯一操作入口。
-- stdout JSON 是真相源。
-- 汇报成功前必须读取 `_errors`。
+- stdout JSON 是真相源，stderr 只用于进度信息。
+- 搜索结果要交给另一个 Agent 或程序消费时，使用 `search --contract-v2 --output json`；该命令直接返回 `ppt_library.search_response.v2` envelope。
+- 汇报成功前必须同时检查进程退出码与 `_errors[*].severity`；`error` 阻断，`warning` 随结果汇报。
 - smoke test 优先使用 `--home-dir /tmp/ppt-lib-smoke`。
 - 建库前应先 `sources scan --dry-run`，再由用户确认后执行 `sources scan --apply` 写入 scan-state。未确认前不允许扫描：
   - `~/Library/Caches`
@@ -46,6 +47,10 @@ ppt-library/
 - `index --from-sources --with-ai-summary` 前必须确认 `profile build` 返回 `ready=true`。
 - `watch` 只有用户明确要求时才启动。
 - 客户文件路径和本地样本数据只留在本机。
+- `compose` 默认只生成可审查 run；`--confirm <run-dir>/narrative-plan.json` 执行该 run 已冻结的 selection/manifest；只有明确授权全自动时使用 `--auto`。
+- `capabilities --probe` 会真实访问已配置 provider，并设置短超时；普通 capability 检查不加 `--probe`。
+- Workbench 默认只绑定 loopback。远程绑定必须同时提供 `--allow-remote --auth-token-env <ENV_NAME>`；绑定通配地址时还要用 `--cors-origin` 明确列出可信浏览器来源。token 只从环境变量读取，并拥有整个本地素材库数据库的管理员权限。
+- Workbench 的 `workspace_id` 只是在单个服务进程内防止请求误投的 namespace 标签，不提供多租户数据隔离。远程 HTTP 仅限可信网络，跨网络访问应放在 TLS 反向代理或 SSH 隧道后；多人身份、租户隔离与 OIDC 留到后续企业版迭代。
 
 ## 安装后 Smoke Prompt
 
@@ -60,6 +65,7 @@ ppt-lib --version
 ppt-lib --home-dir /tmp/ppt-lib-smoke schema --output json
 ppt-lib --home-dir /tmp/ppt-lib-smoke status
 ppt-lib --home-dir /tmp/ppt-lib-smoke vision --test
+ppt-lib --home-dir /tmp/ppt-lib-smoke capabilities --output json
 ```
 
 如果 CLI 只在源码 checkout 内可用：
@@ -69,6 +75,7 @@ uv run --extra test ppt-lib --version
 uv run --extra test ppt-lib --home-dir /tmp/ppt-lib-smoke schema --output json
 uv run --extra test ppt-lib --home-dir /tmp/ppt-lib-smoke status
 uv run --extra test ppt-lib --home-dir /tmp/ppt-lib-smoke vision --test
+uv run --extra test ppt-lib --home-dir /tmp/ppt-lib-smoke capabilities --output json
 ```
 
 ## Troubleshooting

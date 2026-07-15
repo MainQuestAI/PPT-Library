@@ -2,6 +2,38 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.0.1.dev0] - 2026-07-13
+
+### Security
+- Centralized sensitive setting registration now includes `embedding_api_key`, so config output is redacted and config writes are rejected consistently.
+- Legacy plaintext secrets in `config.yml` emit a value-safe warning with the stable `CONFIG_PLAINTEXT_SECRET_DETECTED` code.
+- Source scanning refuses symlinks, preventing traversal outside configured roots and recursive symlink loops.
+- Sample QA `--fresh` requires an owned-home sentinel and unlinks generated symlinks without deleting their targets.
+- Updated vulnerable optional dependencies to their fixed releases.
+
+### Release engineering
+- Development versions and stable public snapshots now follow separate release-history rules; stable builds accept only `public/main` or one direct, non-merge snapshot commit.
+- Source and wheel artifacts are checked against tracked-file and path allowlists, archive links, and private/secret content patterns without exposing matched values.
+- The direct Hatchling build-backend requirement is pinned to an exact version.
+- CI uses locked dependency sync, a Python/macOS/Linux matrix, coverage thresholds, dependency and static security scans, and package build checks.
+
+### Data and search
+- Added the idempotent Schema v6 migration, separating derived slide files into `slide_artifacts` while reserving `slide_assets` for canonical assets and preserving v5 data.
+- Added explicit cascade, detach, and history-preserving deletion rules, plus transactional invalidation of summaries, embeddings, identities, importance scores, and FTS documents when slide content changes.
+- Connected FTS5 and SQLite vector recall to the real slide/identity schema, corrected lexical ranking order, and added RRF fusion, business scoring, reranker timeout fallback, and query traces.
+- Added native `search-response.v2` output to the API and `ppt-lib search --contract-v2`, with production search rules reused by evaluation.
+
+### Agent and Workbench
+- Contract validation now uses JSON Schema Draft 2020-12, including nested constraints, references, aliases, and stable error reporting.
+- Capability reporting now probes configured providers with bounded timeouts and reports optional Workbench availability from installed dependencies.
+- Deck Master selection keeps stable beat/page identities; assembly now preserves skip/confirm/manual-review lineage and records usage only after successful completion.
+- Workbench now provides functional Dashboard, Search, Assets, Health, Review, and Jobs views backed by the application service layer and Search v2.
+- Workbench defaults to loopback access; remote binding requires explicit opt-in and a whole-library administrator token. Requests enforce Host validation, trusted browser origins, CSRF-equivalent protection, RBAC, and a single-process workspace namespace; state changes persist audit intent before business execution and record the outcome afterward.
+- Remote HTTP is limited to trusted networks or operation behind a TLS reverse proxy or SSH tunnel. Multi-tenant data isolation and user identity remain deferred.
+
+### Quality
+- Added separate 80% statement and 65% branch coverage gates, Workbench/API execution in CI, all-extras dependency auditing, high-severity static analysis, and synthetic end-to-end demo verification.
+
 ## [2.0.0] - 2026-06-24
 
 ### Added

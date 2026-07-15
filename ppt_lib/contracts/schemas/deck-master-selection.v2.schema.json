@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ppt-library.local/contracts/deck-master-selection.v2.schema.json",
+  "title": "Deck Master PPT Library Selection v2",
+  "type": "object",
+  "required": [
+    "schema_version", "run_id", "source", "producer_version", "identity_scope",
+    "generated_at", "capability_snapshot", "selections", "gaps"
+  ],
+  "properties": {
+    "schema_version": {"const": "deck_master_ppt_library_selection.v2"},
+    "run_id": {"type": "string", "minLength": 1},
+    "source": {"const": "ppt-library"},
+    "producer_version": {"type": "string", "minLength": 1},
+    "identity_scope": {"const": "ppt_library_database_lifecycle"},
+    "generated_at": {"type": "string", "minLength": 1},
+    "capability_snapshot": {
+      "type": "object",
+      "required": [
+        "schema_version", "overall_status", "semantic_search_ready",
+        "role_selection_ready", "preview_status"
+      ],
+      "properties": {
+        "schema_version": {"const": "ppt_library_readiness.v1"},
+        "overall_status": {"enum": ["ready", "degraded_ready", "blocked"]},
+        "semantic_search_ready": {"type": "boolean"},
+        "role_selection_ready": {"type": "boolean"},
+        "preview_status": {"enum": ["ready", "degraded", "missing"]},
+        "data_hygiene_status": {"enum": ["clean", "degraded", "blocked"]},
+        "reason_codes": {"type": "array", "items": {"type": "string"}}
+      },
+      "additionalProperties": false
+    },
+    "selections": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/selection"}
+    },
+    "gaps": {"type": "array", "items": {"type": "string"}}
+  },
+  "$defs": {
+    "selection": {
+      "type": "object",
+      "required": [
+        "beat_id", "page_task_id", "query_trace_id", "role_original",
+        "role_strategy", "role_mapped", "retrieval_method", "fallback_reason",
+        "preview_status", "candidates"
+      ],
+      "properties": {
+        "beat_id": {"type": "string", "minLength": 1},
+        "page_task_id": {"type": "string", "minLength": 1},
+        "query_trace_id": {"type": "string", "minLength": 1},
+        "role_original": {"type": "string", "minLength": 1},
+        "role_strategy": {"type": "string", "minLength": 1},
+        "role_mapped": {
+          "enum": ["opener", "problem", "solution", "architecture", "case", "roi", "cta", "appendix"]
+        },
+        "retrieval_method": {"enum": ["role_selection", "semantic_fallback", "none"]},
+        "fallback_reason": {"type": ["string", "null"]},
+        "preview_status": {"enum": ["ready", "missing", "invalid"]},
+        "candidates": {"type": "array", "items": {"$ref": "#/$defs/candidate"}}
+      },
+      "additionalProperties": false
+    },
+    "candidate": {
+      "type": "object",
+      "required": [
+        "candidate_id", "asset_key", "slide_id", "canonical_slide_id",
+        "source_asset_id", "source_display_name", "source_locator", "title",
+        "text_summary", "page_number", "score", "confidence", "screenshot_ref",
+        "preview_status", "candidate_origin", "reuse_policy"
+      ],
+      "properties": {
+        "candidate_id": {"type": "string", "minLength": 1},
+        "asset_key": {"type": "string", "minLength": 1},
+        "slide_id": {"type": ["integer", "null"]},
+        "canonical_slide_id": {"type": ["integer", "null"]},
+        "source_asset_id": {"type": "string", "minLength": 1},
+        "source_display_name": {"type": "string", "minLength": 1},
+        "source_locator": {"type": "string", "minLength": 1},
+        "title": {"type": ["string", "null"]},
+        "text_summary": {"type": "string"},
+        "page_number": {"type": "integer", "minimum": 1},
+        "score": {"type": "number"},
+        "confidence": {"type": ["number", "null"]},
+        "screenshot_ref": {"type": ["string", "null"]},
+        "preview_status": {"enum": ["ready", "missing", "invalid"]},
+        "candidate_origin": {"const": "ppt_library"},
+        "reuse_policy": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

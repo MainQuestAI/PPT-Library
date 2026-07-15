@@ -195,10 +195,11 @@ def get_lineage_chain(
         dir_: str,
     ) -> None:
         if depth > max_depth or current in visited:
-            if len(path) > 1:
+            terminal_path = path + [current]
+            if len(terminal_path) > 1:
                 confidences = [1.0] * len(types)
                 paths.append(LineagePath(
-                    asset_ids=path,
+                    asset_ids=terminal_path,
                     edge_types=types,
                     total_confidence=sum(confidences) / len(confidences) if confidences else 0,
                 ))

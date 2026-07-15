@@ -4,13 +4,21 @@ from __future__ import annotations
 import json
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from ppt_lib.assembler import AssembleReport, load_assemble_manifest, run_assemble
-from ppt_lib.selector import SelectionReport, build_manifest_from_selection, select_slides, select_slides_from_plan
+from ppt_lib.searcher import SearchResult
+from ppt_lib.selector import (
+    RoleSelection,
+    SelectionReport,
+    build_manifest_from_selection,
+    record_assembled_usage,
+    select_slides,
+    select_slides_from_plan,
+)
 from ppt_lib.settings import Settings
 
 
@@ -73,7 +81,7 @@ def compose(
     actual_run_name = run_name or f"compose-{run_id}"
     assert settings.home_dir is not None
     run_dir = settings.home_dir / "composed" / run_id
-    run_dir.mkdir(parents=True, exist_ok=True)
+    run_dir.mkdir(parents=True, exist_ok=False)
 
     timings = ComposeTimings()
     total_start = time.monotonic()
@@ -148,9 +156,8 @@ def compose(
         })
 
     # Record usage if deal_id provided
-    if deal_id is not None and not dry_run:
-        from ppt_lib.selector import record_selection_usage
-        record_selection_usage(settings, selection, deal_id=deal_id)
+    if deal_id is not None and assemble_report is not None and assemble_report.status != "failed":
+        _record_assembly_usage(settings, assemble_report, deal_id=deal_id)
 
     # Write diff-summary.md
     _write_diff_summary(run_dir, selection, manifest_dict, plan_source)
@@ -178,38 +185,58 @@ def compose_confirm(
     deal_id: int | None = None,
     verbose: bool = False,
 ) -> ComposeResult:
-    """Execute compose from a previously saved narrative-plan.json."""
-    plan = json.loads(plan_path.read_text(encoding="utf-8"))
-    roles = plan.get("roles", [])
-    brief = plan.get("brief", "")
-    industry = plan.get("industry")
+    """Assemble the frozen selection and manifest saved by a dry run."""
+    started = time.monotonic()
+    run_dir = plan_path.parent
+    manifest_path = run_dir / "manifest.json"
+    selection_path = run_dir / "selection-report.json"
+    missing = [str(path) for path in (manifest_path, selection_path) if not path.is_file()]
+    if missing:
+        raise ValueError(f"Confirmed compose run is incomplete; missing artifact(s): {', '.join(missing)}")
 
-    if not roles:
-        raise ValueError("Plan file must contain 'roles'.")
+    plan = _read_json_object(plan_path, label="narrative plan")
+    manifest_dict = _read_json_object(manifest_path, label="assemble manifest")
+    selection = _selection_from_dict(_read_json_object(selection_path, label="selection report"))
+    assemble_manifest = load_assemble_manifest(manifest_path)
+    if overwrite and not assemble_manifest.overwrite:
+        assemble_manifest = replace(assemble_manifest, overwrite=True)
 
-    result = compose(
-        settings,
-        roles=roles,
-        brief=brief,
-        industry=industry,
-        dry_run=False,
-        overwrite=overwrite,
-        deal_id=deal_id,
-        verbose=verbose,
+    assemble_started = time.monotonic()
+    assemble_report = run_assemble(assemble_manifest)
+    timings = ComposeTimings(
+        assemble_ms=int((time.monotonic() - assemble_started) * 1000),
+        total_ms=int((time.monotonic() - started) * 1000),
     )
+    if verbose:
+        _write_json(
+            run_dir / "compose-timing.json",
+            {
+                "select_slides_ms": 0,
+                "build_manifest_ms": 0,
+                "assemble_ms": timings.assemble_ms,
+                "total_ms": timings.total_ms,
+            },
+        )
+    if deal_id is not None and assemble_report.status != "failed":
+        _record_assembly_usage(settings, assemble_report, deal_id=deal_id)
 
-    # Overwrite plan source to 'confirmed' for consistency
-    plan_out = result.run_dir / "narrative-plan.json"
-    if plan_out.exists():
-        plan_data = json.loads(plan_out.read_text(encoding="utf-8"))
-        plan_data["source"] = "confirmed"
-        plan_out.write_text(json.dumps(plan_data, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
-
-    return result
+    plan["source"] = "confirmed"
+    _write_json(plan_path, plan)
+    _print_compose_summary(selection, timings, False)
+    return ComposeResult(
+        run_id=run_dir.name,
+        run_dir=run_dir,
+        selection_report=selection,
+        manifest=manifest_dict,
+        assemble_report=assemble_report,
+        gaps=selection.gaps,
+        timings=timings,
+        dry_run=False,
+    )
 
 
 def _run_id() -> str:
-    return datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
+    return datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
 
 
 def _write_json(path: Path, data: Any) -> None:
@@ -224,8 +251,11 @@ def _selection_to_dict(report: SelectionReport) -> dict[str, object]:
         "roles": [
             {
                 "role": rs.role,
+                "beat_id": rs.beat_id,
+                "page_task_id": rs.page_task_id,
                 "count": len(rs.slides),
                 "status": "gap" if rs.gap else "matched",
+                "gap": rs.gap,
                 "slides": [
                     {
                         "slide_id": s.slide_id,
@@ -243,6 +273,90 @@ def _selection_to_dict(report: SelectionReport) -> dict[str, object]:
         "total_slides": report.total_slides,
         "gaps": report.gaps,
     }
+
+
+def _selection_from_dict(payload: dict[str, object]) -> SelectionReport:
+    raw_roles = payload.get("roles")
+    if not isinstance(raw_roles, list):
+        raise ValueError("Selection report must contain a roles array.")
+    roles: list[RoleSelection] = []
+    for index, raw_role in enumerate(raw_roles):
+        if not isinstance(raw_role, dict) or not isinstance(raw_role.get("role"), str):
+            raise ValueError(f"Selection report roles[{index}] is invalid.")
+        raw_slides = raw_role.get("slides", [])
+        if not isinstance(raw_slides, list):
+            raise ValueError(f"Selection report roles[{index}].slides must be an array.")
+        slides: list[SearchResult] = []
+        for slide_index, raw_slide in enumerate(raw_slides):
+            if not isinstance(raw_slide, dict):
+                raise ValueError(f"Selection report roles[{index}].slides[{slide_index}] is invalid.")
+            try:
+                slides.append(
+                    SearchResult(
+                        slide_id=int(raw_slide["slide_id"]),
+                        score=float(raw_slide.get("score", 0.0)),
+                        title=raw_slide.get("title") if isinstance(raw_slide.get("title"), str) else None,
+                        text_summary="",
+                        source_file=Path(str(raw_slide["source_file"])),
+                        page_number=int(raw_slide["page_number"]),
+                        screenshot_path=None,
+                        source="selection-report",
+                        confidence=None,
+                        metadata={},
+                        score_breakdown=raw_slide.get("score_breakdown") if isinstance(raw_slide.get("score_breakdown"), dict) else None,
+                    )
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(f"Selection report roles[{index}].slides[{slide_index}] is invalid.") from exc
+        role = str(raw_role["role"])
+        gap = bool(raw_role.get("gap", raw_role.get("status") == "gap"))
+        roles.append(
+            RoleSelection(
+                role=role,
+                slides=slides,
+                gap=gap,
+                beat_id=_optional_string(raw_role.get("beat_id")) or role,
+                page_task_id=_optional_string(raw_role.get("page_task_id")) or role,
+            )
+        )
+    gaps = payload.get("gaps", [])
+    raw_options = payload.get("options")
+    options = {str(key): value for key, value in raw_options.items()} if isinstance(raw_options, dict) else {}
+    return SelectionReport(
+        query=str(payload.get("query", "")),
+        options=options,
+        roles=roles,
+        total_slides=sum(len(role.slides) for role in roles),
+        gaps=[str(item) for item in gaps] if isinstance(gaps, list) else [],
+        timestamp=str(payload.get("timestamp", "")),
+    )
+
+
+def _read_json_object(path: Path, *, label: str) -> dict[str, object]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise ValueError(f"Cannot read {label}: {path}") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid {label} JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"{label.capitalize()} must be a JSON object.")
+    return payload
+
+
+def _record_assembly_usage(settings: Settings, report: AssembleReport, *, deal_id: int) -> int:
+    slide_ids = [
+        slide.source_slide_id
+        for slide in sorted(report.slides, key=lambda item: item.output_page_number)
+        if slide.status == "copied" and slide.source_slide_id is not None
+    ]
+    if not slide_ids:
+        return 0
+    return record_assembled_usage(settings, slide_ids, deal_id=deal_id)
+
+
+def _optional_string(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None
 
 
 def _write_diff_summary(run_dir: Path, selection: SelectionReport, manifest: dict[str, object], plan_source: str) -> None:
@@ -295,4 +409,3 @@ def _print_compose_summary(selection: SelectionReport, timings: ComposeTimings, 
         "",
     ]
     sys.stderr.write("\n".join(lines) + "\n")
-

@@ -130,6 +130,27 @@ class TestGetLineageChain:
         paths = get_lineage_chain(conn, "a1", direction="outgoing")
         assert paths == []
 
+    def test_cycle_path_includes_closing_asset(self):
+        conn = _create_db()
+        add_lineage_edge(conn, "a1", "a2", "revision")
+        add_lineage_edge(conn, "a2", "a1", "copy")
+
+        paths = get_lineage_chain(conn, "a1", direction="outgoing")
+
+        assert paths[0].asset_ids == ["a1", "a2", "a1"]
+        assert paths[0].edge_types == ["revision", "copy"]
+        assert len(paths[0].asset_ids) == len(paths[0].edge_types) + 1
+
+    def test_depth_limited_path_includes_terminal_asset(self):
+        conn = _create_db()
+        add_lineage_edge(conn, "a1", "a2", "revision")
+        add_lineage_edge(conn, "a2", "a3", "copy")
+
+        paths = get_lineage_chain(conn, "a1", direction="outgoing", max_depth=0)
+
+        assert paths[0].asset_ids == ["a1", "a2"]
+        assert paths[0].edge_types == ["revision"]
+
 
 class TestChangeSummary:
     def test_compute_summary(self):

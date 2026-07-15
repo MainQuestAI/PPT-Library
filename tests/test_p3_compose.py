@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 
 from ppt_lib.config import load_settings
-from ppt_lib.db import PresentationRecord, SlideRecord, connect, init_db, upsert_presentation, upsert_slide
+from ppt_lib.db import PresentationRecord, SlideRecord, connect, init_db, insert_deal, upsert_presentation, upsert_slide
 
 
 class StaticProvider:
@@ -130,16 +130,97 @@ def test_compose_confirm_from_plan(tmp_path: Path, monkeypatch) -> None:
         ),
     )
     monkeypatch.setattr("ppt_lib.composer.run_assemble", lambda m: fake_report)
-    monkeypatch.setattr("ppt_lib.composer.load_assemble_manifest", lambda p: None)
+    monkeypatch.setattr(
+        "ppt_lib.composer.select_slides",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("confirm must not reselect")),
+    )
 
     confirm_result = compose_confirm(settings, plan_path=plan_path)
     assert confirm_result.dry_run is False
     assert confirm_result.assemble_report is not None
     assert confirm_result.assemble_report.status == "completed"
+    assert confirm_result.run_dir == dry_result.run_dir
+    assert confirm_result.manifest == dry_result.manifest
+    assert [item.role for item in confirm_result.selection_report.roles] == ["opener", "case"]
 
     # D2: verify plan source is 'confirmed'
     plan_data = json.loads((confirm_result.run_dir / "narrative-plan.json").read_text())
     assert plan_data["source"] == "confirmed"
+
+
+def test_compose_failed_assembly_does_not_record_usage(tmp_path: Path, monkeypatch) -> None:
+    _seed_db(tmp_path)
+    settings = load_settings({"home_dir": tmp_path, "embedding_provider": "fake"}, config_path=tmp_path / "config.yml")
+    monkeypatch.setattr("ppt_lib.selector.build_embedding_provider", lambda s: StaticProvider(np.ones(1536)))
+    conn = connect(settings.db_path)
+    deal_id = insert_deal(conn, deal_name="failed-compose", outcome="pending")
+    conn.commit()
+    conn.close()
+
+    from ppt_lib.assembler import AssembleFidelityReport, AssembleReport
+    from ppt_lib.composer import compose
+
+    monkeypatch.setattr(
+        "ppt_lib.composer.run_assemble",
+        lambda manifest: AssembleReport(
+            schema_version="1.0",
+            run_id="failed",
+            status="failed",
+            output_path=manifest.output_path,
+            slide_count=0,
+            slides=[],
+            errors=["package_error: invalid pptx"],
+            fidelity=AssembleFidelityReport("", "", True, []),
+        ),
+    )
+
+    result = compose(
+        settings,
+        roles=["opener"],
+        brief="retail",
+        deal_id=deal_id,
+    )
+
+    assert result.assemble_report is not None
+    assert result.assemble_report.status == "failed"
+    conn = connect(settings.db_path)
+    assert conn.execute("SELECT COUNT(*) FROM slide_usage").fetchone()[0] == 0
+    conn.close()
+
+
+def test_compose_records_only_slides_present_in_assembly_report(tmp_path: Path, monkeypatch) -> None:
+    _seed_db(tmp_path)
+    settings = load_settings({"home_dir": tmp_path, "embedding_provider": "fake"}, config_path=tmp_path / "config.yml")
+    monkeypatch.setattr("ppt_lib.selector.build_embedding_provider", lambda s: StaticProvider(np.ones(1536)))
+    conn = connect(settings.db_path)
+    deal_id = insert_deal(conn, deal_name="partial-compose", outcome="pending")
+    conn.commit()
+    opener_id = conn.execute("SELECT id FROM slides WHERE narrative_role = 'opener'").fetchone()[0]
+    conn.close()
+
+    from ppt_lib.assembler import AssembleFidelityReport, AssembleReport, AssembleSlideReport
+    from ppt_lib.composer import compose
+
+    monkeypatch.setattr(
+        "ppt_lib.composer.run_assemble",
+        lambda manifest: AssembleReport(
+            schema_version="1.0",
+            run_id="partial",
+            status="partial",
+            output_path=manifest.output_path,
+            slide_count=1,
+            slides=[AssembleSlideReport(1, str(tmp_path / "opener_a.pptx"), 1, "copied", "low", [], opener_id)],
+            errors=[],
+            fidelity=AssembleFidelityReport("", "", True, []),
+        ),
+    )
+
+    compose(settings, roles=["opener", "case"], brief="retail", deal_id=deal_id)
+
+    conn = connect(settings.db_path)
+    rows = conn.execute("SELECT slide_id, position FROM slide_usage ORDER BY position").fetchall()
+    conn.close()
+    assert rows == [(opener_id, 1)]
 
 
 # --- compose gap detection ---
@@ -227,6 +308,72 @@ def test_cli_compose_brief_auto_reaches_composer(tmp_path: Path, monkeypatch, ca
     assert seen["roles"] is None
     assert seen["dry_run"] is False
     assert payload["result"]["run_id"] == "run-1"
+
+
+def test_cli_compose_defaults_to_reviewable_dry_run_without_auto(tmp_path: Path, monkeypatch, capsys) -> None:
+    from ppt_lib.cli import main
+    from ppt_lib.composer import ComposeResult, ComposeTimings
+    from ppt_lib.selector import SelectionReport
+
+    seen: dict[str, object] = {}
+
+    def fake_compose(settings, **kwargs):
+        seen.update(kwargs)
+        return ComposeResult(
+            run_id="run-preview",
+            run_dir=tmp_path / "composed" / "run-preview",
+            selection_report=SelectionReport("brief", {}, [], 0, [], "2026-07-13T00:00:00+00:00"),
+            manifest={},
+            assemble_report=None,
+            gaps=[],
+            timings=ComposeTimings(),
+            dry_run=True,
+        )
+
+    monkeypatch.setattr("ppt_lib.composer.compose", fake_compose)
+
+    exit_code = main(["--home-dir", str(tmp_path), "compose", "--brief", "retail brief"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert seen["dry_run"] is True
+    assert payload["result"]["dry_run"] is True
+
+
+def test_cli_compose_failed_assembly_exits_one(tmp_path: Path, monkeypatch, capsys) -> None:
+    from ppt_lib.assembler import AssembleFidelityReport, AssembleReport
+    from ppt_lib.cli import main
+    from ppt_lib.composer import ComposeResult, ComposeTimings
+    from ppt_lib.selector import SelectionReport
+
+    monkeypatch.setattr(
+        "ppt_lib.composer.compose",
+        lambda settings, **kwargs: ComposeResult(
+            run_id="run-failed",
+            run_dir=tmp_path / "composed" / "run-failed",
+            selection_report=SelectionReport("brief", {}, [], 0, [], "2026-07-13T00:00:00+00:00"),
+            manifest={},
+            assemble_report=AssembleReport(
+                schema_version="1.0",
+                run_id="assemble-failed",
+                status="failed",
+                output_path=tmp_path / "failed.pptx",
+                slide_count=0,
+                slides=[],
+                errors=["package_error: invalid pptx"],
+                fidelity=AssembleFidelityReport("", "", True, []),
+            ),
+            gaps=[],
+            timings=ComposeTimings(),
+        ),
+    )
+
+    exit_code = main(["--home-dir", str(tmp_path), "compose", "--brief", "retail", "--auto"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 1
+    assert payload["result"]["assemble_status"] == "failed"
+    assert payload["_errors"][0]["code"] == "COMPOSE_ASSEMBLE_FAILED"
 
 
 def test_cli_compose_brief_dry_run_wins_over_auto(tmp_path: Path, monkeypatch, capsys) -> None:

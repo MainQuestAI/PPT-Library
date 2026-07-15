@@ -5,10 +5,10 @@ Establishes a Search Document model and FTS5 tables for lexical recall.
 
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 from dataclasses import dataclass
-from typing import Any
 
 # FTS5 table name
 FTS_TABLE = "slides_fts"
@@ -78,7 +78,7 @@ class LexicalSearchResult:
 # ---------------------------------------------------------------------------
 
 
-def create_fts_tables(conn: sqlite3.Connection) -> None:
+def create_fts_tables(conn: sqlite3.Connection, *, commit: bool = True) -> None:
     """Create FTS5 tables if they don't exist."""
     conn.execute(
         f"""CREATE VIRTUAL TABLE IF NOT EXISTS [{FTS_TABLE}]
@@ -100,7 +100,8 @@ def create_fts_tables(conn: sqlite3.Connection) -> None:
                 tokenize='{FTS_TOKENIZER}'
             )"""
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 def fts_tables_exist(conn: sqlite3.Connection) -> bool:
@@ -118,7 +119,7 @@ def fts_tables_exist(conn: sqlite3.Connection) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def index_search_document(conn: sqlite3.Connection, doc: SearchDocument) -> None:
+def index_search_document(conn: sqlite3.Connection, doc: SearchDocument, *, commit: bool = True) -> None:
     """Insert or replace a search document in FTS5."""
     # FTS5 requires delete + insert for replace semantics
     conn.execute(
@@ -149,41 +150,76 @@ def index_search_document(conn: sqlite3.Connection, doc: SearchDocument) -> None
             doc.scenario,
         ),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
-def index_from_slides(conn: sqlite3.Connection, *, limit: int | None = None) -> int:
+def index_from_slides(
+    conn: sqlite3.Connection,
+    *,
+    limit: int | None = None,
+    slide_ids: list[int] | None = None,
+    commit: bool = True,
+) -> int:
     """Build FTS5 documents from existing slides table.
 
     Returns the number of documents indexed.
     """
     if not fts_tables_exist(conn):
-        create_fts_tables(conn)
+        create_fts_tables(conn, commit=False)
 
     cursor = conn.cursor()
-    query = """
+    slide_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(slides)")}
+    optional = {
+        name: f"s.{name}" if name in slide_columns else "NULL"
+        for name in ("ai_summary", "narrative_role", "industry", "scenario")
+    }
+    query = f"""
         SELECT s.id, s.title, s.text_content, s.metadata_json,
-               s.slide_revision_id, s.canonical_asset_id
+               aim.slide_revision_id, aim.canonical_asset_id,
+               {optional['ai_summary']}, {optional['narrative_role']},
+               {optional['industry']}, {optional['scenario']}
         FROM slides s
         LEFT JOIN asset_identity_map aim
             ON aim.legacy_slide_id = s.id
     """
-    if limit:
-        query += f" LIMIT {limit}"
+    params: list[object] = []
+    if slide_ids is not None:
+        if not slide_ids:
+            return 0
+        placeholders = ",".join("?" for _ in slide_ids)
+        query += f" WHERE s.id IN ({placeholders})"
+        params.extend(slide_ids)
+    query += " ORDER BY s.id"
+    if limit is not None:
+        query += " LIMIT ?"
+        params.append(limit)
 
-    cursor.execute(query)
+    cursor.execute(query, params)
     count = 0
 
     for row in cursor.fetchall():
-        slide_id, title, text_content, metadata_json, rev_id, canon_id = row
+        (
+            slide_id,
+            title,
+            text_content,
+            metadata_json,
+            rev_id,
+            canon_id,
+            ai_summary,
+            narrative_role,
+            industry,
+            scenario,
+        ) = row
 
-        metadata: dict[str, Any] = {}
+        metadata: dict[str, object] = {}
         if metadata_json:
             try:
-                import json
-                metadata = json.loads(metadata_json)
-            except Exception:
-                pass
+                parsed = json.loads(metadata_json)
+                if isinstance(parsed, dict):
+                    metadata = parsed
+            except (TypeError, json.JSONDecodeError):
+                metadata = {}
 
         doc = SearchDocument(
             search_document_id=f"sd_{slide_id}",
@@ -192,31 +228,57 @@ def index_from_slides(conn: sqlite3.Connection, *, limit: int | None = None) -> 
             legacy_slide_id=slide_id,
             title=title or "",
             body_text=text_content or "",
-            ocr_markdown=metadata.get("ocr_markdown", "") or "",
-            ai_summary=metadata.get("ai_summary", "") or "",
-            deck_summary=metadata.get("deck_summary", "") or "",
-            narrative_role=metadata.get("narrative_role", "") or "",
-            page_role=metadata.get("page_role", "") or "",
-            page_archetype=metadata.get("page_archetype", "") or "",
-            industry=metadata.get("industry", "") or "",
-            scenario=metadata.get("scenario", "") or "",
+            ocr_markdown=str(metadata.get("ocr_markdown", "") or ""),
+            ai_summary=str(ai_summary or ""),
+            deck_summary="",
+            narrative_role=str(narrative_role or ""),
+            page_role=str(metadata.get("page_role", "") or ""),
+            page_archetype=str(metadata.get("page_archetype", "") or ""),
+            industry=str(industry or ""),
+            scenario=str(scenario or ""),
         )
-        index_search_document(conn, doc)
+        index_search_document(conn, doc, commit=False)
         count += 1
 
+    if commit:
+        conn.commit()
     return count
 
 
-def remove_search_document(conn: sqlite3.Connection, search_document_id: str) -> None:
+def remove_search_document(conn: sqlite3.Connection, search_document_id: str, *, commit: bool = True) -> None:
     """Remove a search document from FTS5."""
     conn.execute(
         f"DELETE FROM [{FTS_TABLE}] WHERE search_document_id = ?",
         (search_document_id,),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
-def rebuild_fts(conn: sqlite3.Connection) -> None:
+def remove_search_documents_for_slides(
+    conn: sqlite3.Connection,
+    slide_ids: list[int],
+    *,
+    commit: bool = True,
+) -> int:
+    if not slide_ids or not fts_tables_exist(conn):
+        return 0
+    deleted = 0
+    for offset in range(0, len(slide_ids), 500):
+        chunk = slide_ids[offset : offset + 500]
+        document_ids = [f"sd_{slide_id}" for slide_id in chunk]
+        placeholders = ",".join("?" for _ in document_ids)
+        cursor = conn.execute(
+            f"DELETE FROM [{FTS_TABLE}] WHERE search_document_id IN ({placeholders})",
+            document_ids,
+        )
+        deleted += max(0, int(cursor.rowcount))
+    if commit:
+        conn.commit()
+    return deleted
+
+
+def rebuild_fts(conn: sqlite3.Connection, *, commit: bool = True) -> None:
     """Rebuild the FTS5 index from scratch by re-reading from the slides table.
 
     This deletes all existing FTS rows and re-indexes from the source slides
@@ -224,12 +286,10 @@ def rebuild_fts(conn: sqlite3.Connection) -> None:
     If the slides table is missing, only the delete is performed.
     """
     conn.execute(f"DELETE FROM [{FTS_TABLE}]")
-    conn.commit()
-    try:
-        index_from_slides(conn)
-    except sqlite3.OperationalError:
-        # slides table missing — nothing to reindex
-        pass
+    if conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='slides'").fetchone()[0]:
+        index_from_slides(conn, commit=False)
+    if commit:
+        conn.commit()
 
 
 def get_fts_document_count(conn: sqlite3.Connection) -> int:
@@ -273,7 +333,7 @@ def lexical_search(
                 ''
             FROM [{FTS_TABLE}]
             WHERE [{FTS_TABLE}] MATCH ?
-            ORDER BY score
+            ORDER BY score DESC, legacy_slide_id ASC
             LIMIT ?""",
         (snippet_size, safe_query, top_k),
     )

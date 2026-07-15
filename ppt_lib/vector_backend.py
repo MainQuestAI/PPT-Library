@@ -96,12 +96,14 @@ class SqliteScanBackend(VectorBackend):
         return "sqlite_scan"
 
     def is_available(self) -> bool:
-        return True
+        return self._conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='slides'"
+        ).fetchone()[0] > 0
 
     def build_index(self, conn: sqlite3.Connection) -> int:
         # SQLite scan doesn't build an index — it reads all embeddings at query time
         cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM embeddings WHERE embedding IS NOT NULL")
+        cursor.execute("SELECT COUNT(*) FROM slides WHERE embedding IS NOT NULL")
         return cursor.fetchone()[0]
 
     def search(
@@ -113,9 +115,10 @@ class SqliteScanBackend(VectorBackend):
     ) -> list[VectorSearchResult]:
         cursor = self._conn.cursor()
         cursor.execute(
-            """SELECT e.slide_id, e.embedding
-               FROM embeddings e
-               WHERE e.embedding IS NOT NULL"""
+            """SELECT id, embedding
+               FROM slides
+               WHERE embedding IS NOT NULL
+               ORDER BY id"""
         )
 
         results: list[VectorSearchResult] = []
@@ -128,6 +131,8 @@ class SqliteScanBackend(VectorBackend):
                 continue
             try:
                 embedding = np.frombuffer(embedding_blob, dtype=np.float32)
+                if embedding.shape != query_embedding.shape:
+                    continue
                 emb_norm = np.linalg.norm(embedding)
                 if emb_norm == 0:
                     continue
@@ -147,11 +152,11 @@ class SqliteScanBackend(VectorBackend):
     def get_status(self) -> VectorBackendStatus:
         try:
             cursor = self._conn.cursor()
-            cursor.execute("SELECT COUNT(*) FROM embeddings WHERE embedding IS NOT NULL")
+            cursor.execute("SELECT COUNT(*) FROM slides WHERE embedding IS NOT NULL")
             count = cursor.fetchone()[0]
             # Try to get dimension from first embedding
             cursor.execute(
-                "SELECT embedding FROM embeddings WHERE embedding IS NOT NULL LIMIT 1"
+                "SELECT embedding FROM slides WHERE embedding IS NOT NULL ORDER BY id LIMIT 1"
             )
             row = cursor.fetchone()
             dimension = len(np.frombuffer(row[0], dtype=np.float32)) if row else None

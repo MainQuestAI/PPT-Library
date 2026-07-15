@@ -8,14 +8,19 @@ PPT Library can produce or consume.  Schemas are bundled in
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from importlib import metadata
 from pathlib import Path
 from typing import Any
 
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError, ValidationError
+
 from ppt_lib.contracts.errors import (
     CONTRACT_NOT_FOUND,
+    CONTRACT_SCHEMA_INVALID,
     CONTRACT_VALIDATION_FAILED,
     ENVELOPE_FIELDS_INVALID,
     ENVELOPE_MISSING,
@@ -31,6 +36,7 @@ _CONTRACT_ALIASES: dict[str, str] = {
     "search-request.v2": "search-request.v2",
     "search-response.v2": "search-response.v2",
     "deck-master-selection.v1": "deck-master-selection.v1",
+    "deck_master_ppt_library_selection.v1": "deck-master-selection.v1",
     "asset-identity.v1": "asset-identity.v1",
     "feedback-event.v1": "feedback-event.v1",
     "job.v1": "job.v1",
@@ -121,55 +127,68 @@ class ContractRegistry:
         except ContractNotFoundError:
             return [error(CONTRACT_NOT_FOUND, f"Unknown contract: {contract_name}", source_module="contracts.registry")]
 
-        errors: list[ContractError] = []
+        schema = defn.schema if strict else deepcopy(defn.schema)
+        if not strict:
+            # Compatibility mode only relaxes the contract envelope. Nested
+            # objects retain their schema constraints and remain validated.
+            schema["additionalProperties"] = True
 
-        # Check required fields
-        for field_name in defn.required_fields:
-            if field_name not in data:
-                errors.append(
-                    error(
-                        CONTRACT_VALIDATION_FAILED,
-                        f"Missing required field: {field_name}",
-                        source_module="contracts.registry",
-                        details={"field": field_name, "contract": contract_name},
-                    )
+        try:
+            Draft202012Validator.check_schema(schema)
+        except SchemaError as exc:
+            return [
+                error(
+                    CONTRACT_SCHEMA_INVALID,
+                    f"Invalid schema for contract '{contract_name}': {exc.message}",
+                    source_module="contracts.registry",
+                    details={
+                        "contract": contract_name,
+                        "schema_path": _json_pointer(exc.absolute_schema_path),
+                    },
                 )
+            ]
 
-        # Check const fields
-        props = defn.schema.get("properties", {})
-        for prop_name, prop_schema in props.items():
-            if "const" in prop_schema and prop_name in data:
-                if data[prop_name] != prop_schema["const"]:
-                    errors.append(
-                        error(
-                            CONTRACT_VALIDATION_FAILED,
-                            f"Field '{prop_name}' must be '{prop_schema['const']}', got '{data[prop_name]}'",
-                            source_module="contracts.registry",
-                            details={"field": prop_name, "expected": prop_schema["const"], "actual": data[prop_name]},
-                        )
-                    )
-
-        # Check additionalProperties
-        if strict and not defn.schema.get("additionalProperties", True):
-            allowed = set(props.keys())
-            extra = set(data.keys()) - allowed
-            if extra:
-                errors.append(
-                    error(
-                        CONTRACT_VALIDATION_FAILED,
-                        f"Additional properties not allowed: {sorted(extra)}",
-                        source_module="contracts.registry",
-                        details={"extra_fields": sorted(extra), "contract": contract_name},
-                    )
-                )
-
-        return errors
+        validator = Draft202012Validator(schema)
+        validation_errors = sorted(
+            validator.iter_errors(data),
+            key=lambda item: (
+                tuple(str(part) for part in item.absolute_path),
+                tuple(str(part) for part in item.absolute_schema_path),
+                item.message,
+            ),
+        )
+        return [_validation_error(contract_name, item) for item in validation_errors]
 
 
 class ContractNotFoundError(KeyError):
     def __init__(self, name: str) -> None:
         super().__init__(f"Contract not found: {name}")
         self.contract_name = name
+
+
+def _validation_error(contract_name: str, exc: ValidationError) -> ContractError:
+    instance_path = _json_pointer(exc.absolute_path)
+    schema_path = _json_pointer(exc.absolute_schema_path)
+    location = instance_path or "/"
+    message = exc.message
+    if exc.validator in {"const", "enum"}:
+        message = f"{message}; received {exc.instance!r}"
+    return error(
+        CONTRACT_VALIDATION_FAILED,
+        f"{location}: {message}",
+        source_module="contracts.registry",
+        details={
+            "contract": contract_name,
+            "instance_path": instance_path,
+            "schema_path": schema_path,
+            "validator": str(exc.validator),
+        },
+    )
+
+
+def _json_pointer(path: Any) -> str:
+    parts = [str(part).replace("~", "~0").replace("/", "~1") for part in path]
+    return "/" + "/".join(parts) if parts else ""
 
 
 # --- Envelope helpers ---
@@ -179,7 +198,7 @@ def _producer_version() -> str:
     try:
         return metadata.version("ppt-library")
     except metadata.PackageNotFoundError:
-        return "0.0.0-dev"
+        return "0+unknown"
 
 
 def build_envelope_v2(

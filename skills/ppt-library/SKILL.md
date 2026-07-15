@@ -1,3 +1,9 @@
+---
+name: ppt-library
+description: 安全调用本地 PPT Library CLI，完成 PPT 资料库建库、索引、搜索、诊断和自动选页组装。
+version: 1.0.0
+---
+
 # ppt-library
 
 ## 能力摘要
@@ -7,7 +13,7 @@
 | 配置引导 | `ppt-lib setup --quick` 或 `ppt-lib setup --mode lmstudio\|paddleocr-mcp\|openai\|text-extraction` |
 | 扫描 PPT，去重，创建统一管理视图 | `ppt-lib discover <dir>` |
 | 监听目录增量索引 | `ppt-lib watch <dir>` |
-| 搜索 slide | `ppt-lib search "<query>" [-k N] [--threshold F]` |
+| 搜索 slide | `ppt-lib search "<query>" [--top-k N] [--threshold F]`；机器契约用 `--contract-v2` |
 | 生成 HTML 审查页 | `ppt-lib search "<query>" --html` |
 | 索引单个文件 | `ppt-lib index <path>` |
 | 批量索引 | `ppt-lib index --batch <dir> [--full]` |
@@ -15,7 +21,6 @@
 | AI 摘要补充 | `ppt-lib profile build` → `ppt-lib enrich` |
 | Deck 理解与关键页 | `ppt-lib enrich-decks --pending` → `ppt-lib insights key-pages` |
 | 标签审查包导出 | `ppt-lib insights review-pack --output <jsonl>` |
-| 视觉模型链路检查 | `ppt-lib models test` |
 | 模型能力检测 | `ppt-lib models test` |
 | 配置查看／修改 | `ppt-lib config path\|get\|set` |
 | 健康检查 | `ppt-lib doctor [--output json]` |
@@ -25,22 +30,25 @@
 | 聚合诊断 | `ppt-lib doctor --output json` |
 | 生成用户画像 | `ppt-lib profile build --output json` |
 | 战绩数据录入 | `ppt-lib record-deal --description ...` / `record-usage` |
-| 叙事批量标注 | `ppt-lib annotate [--batch]` |
+| 叙事批量标注 | `ppt-lib annotate [--batch N]` |
 | 自动选页 | `ppt-lib select-slides --roles <roles> --brief "..."` |
-| 自动组装 | `ppt-lib compose --brief "..." [--auto]` |
+| 自动组装 | `ppt-lib compose --brief "..."` 预览；确认后 `compose --confirm <run-dir>/narrative-plan.json`；明确跳过人工确认时加 `--auto` |
+| 运行时能力 | `ppt-lib capabilities [--probe] --output json` |
 
 ## 通用指引
 
 1. 所有路径要写绝对路径，不要写 `~` 相对路径。
-2. 调用时携带 `--output json`，不要用默认 text 输出。
+2. 命令支持 `--output json` 时显式携带；写文件型命令按其专用 `--output <path>` 契约执行。
 3. JSON 响应体各命令结构不同，先跑一次获取结构，再引用具体字段。
-4. 返回 payload 中的 `_errors` 用于判断是否有阻塞性错误。有错误时输出到 stderr，正常输出到 stdout。
-5. `_meta.schema_version` 字段目前为 `1.0`。后续升级时可能增加字段，但不会破坏向后兼容。
+4. stdout JSON 是机器真相源，stderr 只承载人类进度。先检查进程退出码，再检查 `_errors[*].severity`：`error` 会返回非零退出码，`warning` 可随成功结果返回退出码 0。
+5. 默认 CLI envelope 的 `_meta.schema_version` 字段目前为 `1.0`。`search --contract-v2` 直接输出 `ppt_library.search_response.v2`，以 `_meta.envelope` 和 `_meta.contract` 标识版本，不再套一层旧 envelope。
 6. 画像就绪：使用 AI summary 前必须先执行 `profile build`，并确认 `ready=true`。
 7. 建库前先用 `sources manifest` 生成资料源清单，再通过 `sources scan --dry-run` 确认扫描范围，避免误扫 Home、Downloads、回收站、缓存目录和依赖包目录。
 8. 需要判断“哪些页值得先看”时，先执行 `enrich-decks --pending --limit 20`，再执行 `insights key-pages --output json`。
 9. 需要批量审查标签时，使用 `insights review-pack --output <jsonl>` 导出只读包；标签回写继续使用 `import-metadata`。
 10. 推荐识别链路是本地 embedding + PaddleOCR MCP：先 `setup --mode lmstudio`，再 `setup --mode paddleocr-mcp`；token 只走环境变量，不写入 `config.yml`。
+11. `compose` 默认生成可审查的 selection/manifest；`--confirm` 必须指向同一 run 目录中的 `narrative-plan.json`，CLI 会执行已冻结的 `manifest.json`，不会重新选页。只有明确授权全自动组装时使用 `--auto`。
+12. `search-request.v2` 的 `industry`、`scenario`、`narrative_role`、`page_role`、`review_state` 过滤值使用非空字符串数组；`include_versions` 使用布尔值。未声明的过滤字段会直接返回契约校验错误。
 
 ### 建库前安全确认
 
@@ -69,6 +77,8 @@ ppt-lib sources scan --apply
 ppt-lib index --from-sources
 ppt-lib status --output json
 ppt-lib search "你的查询"
+# Agent 需要稳定机器契约时：
+ppt-lib search "你的查询" --contract-v2 --output json
 ```
 
 如果用户已准备 PaddleOCR MCP，并且资料量较大，可以使用保守文件级并行：
@@ -85,12 +95,12 @@ ppt-lib index --from-sources --file-workers 2
 ppt-lib enrich-decks --pending --limit 20 --output json
 ppt-lib insights key-pages --output json
 ppt-lib insights review-pack --output /absolute/path/to/review-pack.jsonl
-ppt-lib record-deal --name "Synthetic Retail Win" --outcome won --description "Synthetic demo opportunity" --industry retail --scenario proposal --tags demo,key-page
+ppt-lib record-deal --name "Synthetic Demo Win" --outcome won --description "Synthetic demo opportunity" --industry general --scenario proposal --tags demo,key-page
 ppt-lib record-usage --deal-id <deal-id> --slide-id <slide-id> --deck-presentation-id <presentation-id>
-ppt-lib search "业务架构 价值" --ranking business --threshold 0.0 --output json
+ppt-lib search "实施路径 价值" --ranking business --threshold 0.0 --output json
 ```
 
-`insights key-pages` 返回关键页候选、页面角色、重要性分、视觉复核标记和战绩统计。`business ranking` 只有在真实 usage 和 won/lost 数据积累后才会体现业务权重。
+`insights key-pages` 返回关键页候选、页面角色、重要性分、视觉复核标记和战绩统计。`business ranking` 只有在有效 usage 和 won/lost 数据积累后才会体现业务权重。
 
 ### 完整建库（可选，含 AI 摘要）
 
@@ -143,13 +153,13 @@ ppt-lib index /absolute/path/to/deck.pptx
 
 ```json
 {
-  "query": "海外仓售后流程",
+  "query": "实施计划流程",
   "results": [
     {
       "slide_index": 5,
-      "presentation": {"path": "/path/to/deck.pptx", "filename": "solution_overview.pptx"},
-      "title": "海外仓退货流程",
-      "text_snippet": "退货流程图...",
+      "presentation": {"path": "/path/to/deck.pptx", "filename": "demo_overview.pptx"},
+      "title": "实施计划流程",
+      "text_snippet": "流程图...",
       "screenshot_url": "file:///.../screenshots/slide-5.png",
       "score": 0.68,
       "duplicate_group_id": null
@@ -183,6 +193,6 @@ ppt-lib index /absolute/path/to/deck.pptx
 
 - 路径必须绝对路径。
 - 建库流程中的 sources scan 要 **每次** 带 `--dry-run` 预览来确认 safe（home dir、downloads、微信缓存都是高风险来源）。
-- JSON 输出的键名可能带 `_errors` 与 `warnings`。`_errors` 非空时视为该操作有阻塞性问题。
+- JSON 输出可能带 `_errors` 与 `warnings`。以退出码和 `_errors[*].severity` 判断阻塞；warning 需要汇报，但不等同于失败。
 - 默认优先 `setup --quick`。OpenAI-compatible 服务通过 `embedding_api_url`、`embedding_model`、`embedding_dimensions` 配置；LM Studio 默认服务地址为 `http://127.0.0.1:1234/v1`。
 - 当前 embedding 维度：openai=1536，lmstudio=768；切换 provider 后应 `index --from-sources --full` 重算。

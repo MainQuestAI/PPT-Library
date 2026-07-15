@@ -69,6 +69,20 @@ def run_asset_intelligence_gate(
         "message": f"{existing}/{len(tables_to_check)} identity tables exist",
     })
 
+    canonical_asset_columns = _table_columns(conn, "slide_assets")
+    artifact_columns = _table_columns(conn, "slide_artifacts")
+    canonical_asset_schema = {"canonical_asset_id", "asset_type", "labels_json"} <= canonical_asset_columns
+    artifact_schema = {"id", "slide_id", "asset_type", "asset_uri"} <= artifact_columns
+    checks.append({
+        "name": "asset_roles_separated",
+        "passed": canonical_asset_schema and artifact_schema,
+        "message": (
+            "Canonical assets and generated slide artifacts use separate v6 tables"
+            if canonical_asset_schema and artifact_schema
+            else "Canonical asset and generated artifact table roles are not separated"
+        ),
+    })
+
     # Check 2: Identity coverage
     try:
         from ppt_lib.identity import get_identity_coverage
@@ -188,6 +202,16 @@ def run_asset_intelligence_gate(
         checks=checks,
         passed=all_passed,
     )
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    exists = conn.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?",
+        (table,),
+    ).fetchone()[0]
+    if not exists:
+        return set()
+    return {str(row[1]) for row in conn.execute(f"PRAGMA table_info([{table}])")}
 
 
 def export_asset_pack(

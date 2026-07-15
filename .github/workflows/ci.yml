@@ -7,32 +7,157 @@ on:
       - main
       - "codex/**"
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test:
+  test-matrix:
+    name: Test (${{ matrix.os }}, Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["3.12", "3.13"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install test dependencies from lockfile
+        run: uv sync --locked --extra test
+
+      - name: Run tests
+        run: uv run --locked --extra test pytest
+
+  quality:
+    name: Coverage, lint, and types
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
 
-      - name: Install dependencies
-        run: uv sync --extra test --extra lint
+      - name: Install quality dependencies from lockfile
+        run: uv sync --locked --extra test --extra lint --extra workbench
 
-      - name: Run tests
-        run: uv run --extra test pytest
+      - name: Run tests with statement and branch coverage
+        run: >-
+          uv run --locked --extra test --extra workbench pytest
+          --cov=ppt_lib
+          --cov-branch
+          --cov-report=term-missing
+          --cov-report=json:coverage.json
+
+      - name: Enforce statement and branch coverage thresholds
+        run: |
+          uv run --locked python - <<'PY'
+          import json
+          from pathlib import Path
+          from scripts.release_check import check_coverage_report
+
+          result = check_coverage_report(Path("coverage.json"))
+          print(json.dumps(result.__dict__, indent=2))
+          raise SystemExit(0 if result.status == "pass" else 1)
+          PY
+
+      - name: Workbench dependency smoke
+        run: >-
+          uv run --locked --extra workbench python -c
+          "import fastapi, httpx, uvicorn;
+          from ppt_lib.api_server import create_api_app;
+          assert callable(create_api_app)"
 
       - name: Run ruff
-        run: uv run --extra lint ruff check .
+        run: uv run --locked --extra lint ruff check .
 
       - name: Run mypy
-        run: uv run --extra lint mypy
+        run: uv run --locked --extra lint mypy
 
       - name: CLI schema smoke
-        run: uv run --extra test ppt-lib --home-dir /tmp/ppt-lib-ci schema --output json
+        run: uv run --locked ppt-lib --home-dir /tmp/ppt-lib-ci schema --output json
+
+  security-build:
+    name: Security and package build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Install security dependencies from lockfile
+        run: uv sync --locked --extra security
+
+      - name: Verify lockfile
+        run: uv lock --check
+
+      - name: Audit all locked extras
+        run: >-
+          uv export --all-extras --frozen --no-emit-project --no-hashes |
+          uv run --locked --extra security pip-audit
+          -r /dev/stdin --no-deps --disable-pip
+
+      - name: Reject high-severity static security findings
+        run: uv run --locked --extra security bandit -r ppt_lib -lll
+
+      - name: Fetch public release history
+        run: |
+          git remote add public https://github.com/MainQuestAI/PPT-Library.git
+          git fetch public main:refs/remotes/public/main --no-tags
+
+      - name: Build wheel and sdist
+        run: uv build --out-dir /tmp/ppt-lib-dist
+
+      - name: Validate release history and artifact contents
+        run: |
+          uv run --locked python - <<'PY'
+          import json
+          from pathlib import Path
+          from scripts.release_check import (
+              check_built_artifacts,
+              check_private_patterns,
+              check_release_history,
+              check_release_metadata,
+              check_tracked_files,
+              parse_version,
+          )
+
+          root = Path.cwd()
+          version = parse_version((root / "pyproject.toml").read_text(encoding="utf-8"))
+          results = [
+              check_tracked_files(root),
+              check_private_patterns(root),
+              check_release_metadata(root),
+              check_release_history(root, version),
+              check_built_artifacts(root, Path("/tmp/ppt-lib-dist"), version),
+          ]
+          print(json.dumps([result.__dict__ for result in results], indent=2))
+          raise SystemExit(0 if all(result.status == "pass" for result in results) else 1)
+          PY

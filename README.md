@@ -1,68 +1,67 @@
 # PPT Library
 
-> Local-first PPT asset intelligence for humans and AI agents.
+PPT Library 是一个本地优先的 PPTX 资产库 CLI。它把历史 PPT 按页入库，让人类和 AI Agent 都可以搜索、审查、复用、组装和追踪幻灯片资产。
 
-[English](README.en.md) | 中文
+它适合这些场景：
 
-PPT Library 是一个本地优先的 PPTX 资产库工具。它把历史 PPT 按页入库，让团队和 AI Agent 可以搜索、审查、复用、组装和治理幻灯片资产。
+- 方案团队希望从多年历史 PPT 中快速找可复用页面。
+- 售前或咨询团队希望减少重复造页。
+- AI Agent 需要一个稳定的 PPT 检索和组装工具，避免直接翻文件夹猜内容。
+- 团队希望治理同一项目几十个版本的 PPT，默认只展示代表版本，必要时再展开历史版本。
 
-当前公开版本：**v2.0.0**
-数据库 schema：**v5**
-许可证：**Apache-2.0**
+## 核心能力
 
-## 适合谁
+- **页级搜索**：按每一页抽取文本、截图和向量，支持关键词 + 语义检索。
+- **版本治理**：同一项目的多个 PPT 版本会归入同一组，搜索默认优先展示代表版本。
+- **Deck 理解**：支持整份 PPT 的项目、客户、行业、场景、章节结构和摘要补充。
+- **重点页识别**：支持筛选高复用价值页面，便于后续做视觉理解或人工审查。
+- **复用追踪**：记录页面在哪些机会或方案中被使用，并支持后续按战绩排序。
+- **自动组装**：根据 brief 选择相关页面，生成可审查的组装清单和 PPTX 草稿。
+- **Agent 友好**：CLI 支持 JSON 输出，便于 Codex、Claude Code、Hermes、OpenCode 等 Agent 调用。
+- **本地优先**：SQLite、截图、HTML 预览和索引资产默认存储在本机。
+- **推荐识别链路**：本地 embedding + PaddleOCR MCP，可在较低本地资源占用下补齐 PPT 页面的 OCR、版式和图表识别。
 
-- 方案、售前、咨询团队：从多年历史 PPT 中快速找可复用页面。
-- 个人开发者和 AI Coding 用户：给 Codex、Claude Code、OpenCode 等 Agent 一个稳定的 PPT 工具入口。
-- 有大量版本沉淀的团队：默认展示代表版本，需要审计时再展开历史版本。
-- 想把 PPT 从“文件夹资产”升级成“可搜索、可复用、可治理资产”的团队。
+## 组成部分
 
-## v2.0.0 能力概览
+| 路径 | 作用 |
+|---|---|
+| `ppt_lib/` | CLI 和核心运行逻辑 |
+| `skills/ppt-library/` | 面向 Agent 的 Skill，说明 Agent 如何安全调用 `ppt-lib` |
+| `docs/quick-start-guide.md` | 从安装到建库、搜索的完整上手指南 |
+| `docs/guides/agent-install-and-build-guideline.md` | Agent 安装 CLI、收集高价值资产路径、生成 manifest 和启动建库的设计剧本 |
+| `docs/guides/library-build-guideline.md` | 资料库构建流程和安全扫描边界 |
+| `docs/guides/asset-intelligence-demo.md` | 用合成 PPT 演示关键页、战绩、复用追踪和业务排序闭环 |
+| `docs/guides/model-compatibility.md` | LM Studio、PaddleOCR MCP、Ollama、OpenAI-compatible API 配置说明 |
+| `docs/guides/recommended-implementation.md` | 推荐的本地 embedding + PaddleOCR MCP 实施方案 |
+| `docs/specs/` | CLI、数据库、搜索、截图、视觉理解等模块规格 |
 
-| 能力 | 状态 | 说明 |
-|---|---:|---|
-| 页级搜索 | 已实现 | 关键词、FTS5、本地 embedding 和 HTML 审查页 |
-| 版本治理 | 已实现 | 相似 deck 自动归族，默认优先展示代表版本 |
-| 资产身份 | 已实现 | schema v5，引入 asset/revision/lineage 身份体系 |
-| 近重复识别 | 已实现 | 文本、视觉指纹和结构信号组合判断 |
-| 关键页与复用追踪 | 已实现 | 支持关键页候选、战绩、使用记录和业务排序 |
-| 自动组装 | 已实现 | 根据 brief 选择页面，生成可审查组装计划和 PPTX 草稿 |
-| Job Engine | 已实现 | 后台任务模型、状态流转和测试覆盖已完成 |
-| Local Workbench | 已实现 | FastAPI 服务、Workbench shell、SSE 进度和健康事件 |
-| RBAC / Workspace | 已实现 | 角色、权限、workspace 隔离和审计日志 |
-| 策略与审批 | 已实现 | policy engine、approval workflow、治理指标 |
-| Server deployment | 未部署 | 当前公开版聚焦本地运行，生产部署工具后续补齐 |
-| ANN search | 未部署 | 当前默认使用 SQLite/FTS5/embedding 检索链路 |
+## Requirements
 
-## 核心理念
+- Python 3.12+
+- LibreOffice，可选，用于 PPTX 页面截图
+- LM Studio、Ollama 或 OpenAI-compatible API，可选，用于 embedding
+- PaddleOCR MCP，可选，推荐用于 PPT 页面 OCR、版式和图表识别
 
-- **本地优先**：真实 PPT、截图、HTML 预览和 SQLite 数据库默认留在用户本机。
-- **Agent 友好**：CLI 默认可输出 JSON，适合被 AI Agent 安全调用。
-- **人类可审查**：搜索、关键页、组装和治理结果都能导出审查包。
-- **团队可治理**：v2.0.0 加入 workspace、RBAC、policy、approval、audit 和 analytics。
-- **开源快照干净**：公开仓库不包含真实客户 PPT、截图、本地数据库、密钥或构建产物。
+没有模型服务时，PPT Library 仍可做基础文本抽取和关键词搜索；配置 embedding 后，搜索质量会明显提升。
 
-## 安装
+## Installation
 
-当前公开版优先从源码安装。PyPI 发布前，请以本仓库源码安装方式为准。
+当前公开版优先使用源码安装。PyPI 发布前，请以本仓库源码安装方式为准。
 
 ```bash
 git clone https://github.com/MainQuestAI/PPT-Library.git
 cd PPT-Library
 
-# 基础开发、测试、代码检查依赖
+# 安装开发和测试依赖
 uv sync --extra test --extra lint
 
-# 使用 Local Workbench 时安装
-uv sync --extra test --extra lint --extra workbench
-
-# 使用 PaddleOCR MCP 时安装
+# 推荐：同时安装 PaddleOCR MCP 接入依赖
 uv sync --extra test --extra lint --extra paddleocr
 
-# 查看 CLI
+# 从源码目录运行 CLI
 uv run ppt-lib --help
 
-# 安装为本地 CLI 工具
+# 或安装为本地 CLI 工具
 uv tool install .
 ```
 
@@ -72,27 +71,46 @@ uv tool install .
 pip install -e .
 ```
 
-`ppt-library` 是 Python 包名，`ppt-lib` 是命令名。
+`ppt-library` 是 Python 包名，`ppt-lib` 是安装后的命令名。
 
-## 快速开始
+## Quick Start for Humans
 
-### 1. 初始化本地配置
+这条路径适合第一次手动建库和搜索。
 
 ```bash
+# 1. 初始化配置
 uv run ppt-lib setup --quick
-uv run ppt-lib doctor --output json
-uv run ppt-lib capabilities --output json
+
+# 推荐识别方案：本地 embedding + PaddleOCR MCP
+uv run ppt-lib setup --mode lmstudio
+uv run ppt-lib setup --mode paddleocr-mcp
+
+# 2. 创建资料源清单
+uv run ppt-lib sources manifest --library /absolute/path/to/ppt-folder --manifest-output ./ppt-sources.json
+
+# 3. 将资料源清单写入生效 profile
+uv run ppt-lib init --manifest ./ppt-sources.json --non-interactive
+
+# 4. 预览扫描范围
+uv run ppt-lib sources scan --dry-run
+
+# 5. 确认扫描范围并写入本地状态
+uv run ppt-lib sources scan --apply
+
+# 6. 建库
+uv run ppt-lib index --from-sources --file-workers 2
+
+# 7. 搜索并生成 HTML 结果页
+uv run ppt-lib search "技术架构" --html
+
+# 8. 补齐 Deck 理解并查看关键页
+uv run ppt-lib enrich-decks --pending --limit 20
+uv run ppt-lib insights key-pages --output json
 ```
 
-### 2. 创建资料源清单
+搜索结果默认输出到 `~/.ppt-library/html/search-review-*.html`。
 
-```bash
-uv run ppt-lib sources manifest \
-  --library /absolute/path/to/ppt-folder \
-  --manifest-output ./ppt-sources.json
-```
-
-最小清单示例：
+一个最小资料源清单示例：
 
 ```json
 {
@@ -105,103 +123,56 @@ uv run ppt-lib sources manifest \
 }
 ```
 
-### 3. 预览扫描范围
+建议首次建库先用少量 PPTX 验证流程，再扩大到完整资料库。
+
+## Quick Start for Agents
+
+Agent 调用时建议把 `ppt-lib` 当作稳定工具入口，并优先读取 JSON 输出。
+
+如果用户要求 Agent 安装 PPT Library CLI，并希望安装后直接进入建库引导，先读 [Agent Install and Guided Library Build Design](docs/guides/agent-install-and-build-guideline.md)。该文档定义了安装、用户路径问答、`sources-manifest.json` 生成、dry-run 汇报和建库监控流程。
 
 ```bash
-uv run ppt-lib init --manifest ./ppt-sources.json --non-interactive
-uv run ppt-lib sources scan --dry-run
-```
-
-确认范围后再写入本地状态：
-
-```bash
-uv run ppt-lib sources scan --apply
-```
-
-### 4. 建库和搜索
-
-```bash
-uv run ppt-lib index --from-sources --file-workers 2
-uv run ppt-lib search "技术架构" --top-k 8 --output json
-uv run ppt-lib search "技术架构" --html
-```
-
-HTML 搜索结果默认输出到：
-
-```text
-~/.ppt-library/html/search-review-*.html
-```
-
-### 5. 关键页、复用和组装
-
-```bash
-uv run ppt-lib enrich-decks --pending --limit 20 --output json
-uv run ppt-lib insights key-pages --output json
-uv run ppt-lib insights review-pack --output /tmp/ppt-lib-review-pack.jsonl
-
-uv run ppt-lib compose --brief "生成一份客户成功案例方案" --dry-run
-uv run ppt-lib compose --confirm /path/to/narrative-plan.json
-```
-
-## Local Workbench
-
-v2.0.0 已接入本地 Workbench 服务链路：
-
-```bash
-uv sync --extra workbench
-
-uv run ppt-lib workbench start --host 127.0.0.1 --port 8765
-uv run ppt-lib workbench status --output json
-```
-
-Workbench 当前包括：
-
-- FastAPI REST API
-- 标准响应 envelope
-- RBAC 写操作保护
-- SSE job progress 和 health events
-- audit log
-- responsive dashboard shell
-
-搜索、资产、健康详情等完整前端页面仍在后续版本中补齐。
-
-## Agent 使用方式
-
-Agent 应把 `ppt-lib` 当作稳定工具入口，并优先读取 JSON 输出。
-
-```bash
-# 用临时 home-dir 做 smoke test，避免误扫真实文件
+# 1. 用临时 home-dir 做 smoke test，避免误扫真实文件
 uv run ppt-lib --home-dir /tmp/ppt-lib-smoke setup --quick --non-interactive
 uv run ppt-lib --home-dir /tmp/ppt-lib-smoke schema --output json
 uv run ppt-lib --home-dir /tmp/ppt-lib-smoke status --output json
 uv run ppt-lib --home-dir /tmp/ppt-lib-smoke vision --test
 
-# 用户确认资料源后再建库
-uv run ppt-lib sources manifest \
-  --library /absolute/path/to/ppt-folder \
-  --manifest-output ~/.ppt-library/sources/sources-manifest.json \
-  --output json
+# 2. 用户确认资料源后再建库
+uv run ppt-lib sources manifest --library /absolute/path/to/ppt-folder --manifest-output ~/.ppt-library/sources/sources-manifest.json --output json
 uv run ppt-lib init --manifest ~/.ppt-library/sources/sources-manifest.json --non-interactive --output json
 uv run ppt-lib sources scan --dry-run --output json
 uv run ppt-lib sources scan --apply --output json
 uv run ppt-lib index --from-sources
+uv run ppt-lib status --output json
 
-# 搜索时检查 _errors
+# 3. 搜索时使用 JSON，并检查 _errors
 uv run ppt-lib search "会员运营案例" --top-k 8 --output json
+
+# 4. 需要资产经营视角时先查关键页，再导出审查包
+uv run ppt-lib enrich-decks --pending --limit 20 --output json
+uv run ppt-lib insights key-pages --output json
+uv run ppt-lib insights review-pack --output /tmp/ppt-lib-review-pack.jsonl
+
+# 5. 需要组装时先 dry-run，再执行确认后的 plan
+uv run ppt-lib compose --brief "生成一份客户成功案例方案" --dry-run
+uv run ppt-lib compose --confirm /path/to/narrative-plan.json
 ```
 
 Agent 集成要点：
 
-- 默认使用 `--output json`。
-- 汇报成功前检查 `_errors`、failed jobs 和 fallback warning。
+- 默认用 `--output json`，以 stdout JSON 作为结果依据。
+- 汇报成功前必须检查 `_errors`、failed jobs 和 fallback warning。
+- 首次建库优先用 `sources manifest` 收敛用户确认的高价值路径，再 `init --manifest` 写入 profile。
 - 建库前先执行 `sources scan --dry-run`，让用户确认范围后再 `sources scan --apply`。
-- 不扫描下载目录、回收站、缓存目录、依赖包目录、聊天软件文件缓存，除非用户明确确认。
+- 不要扫描下载目录、回收站、缓存目录、依赖包目录、聊天软件文件缓存或其他高风险目录，除非用户明确确认。
+- 长任务期间用 `status --output json` 查看 `sources_health.index_progress`。
 - `watch` 是长运行命令，只在用户明确要求持续监听时启动。
 - 客户文件路径、真实 PPT、截图、HTML 预览和本地数据库都应留在用户本机。
 
-完整 Agent 规则见 [skills/ppt-library/SKILL.md](skills/ppt-library/SKILL.md)。
+更多 Agent 规则见 [skills/ppt-library/SKILL.md](skills/ppt-library/SKILL.md)。
 
-## 安装 Agent Skill
+## Installing the Agent Skill
 
 仓库内置 `ppt-library` Skill，可复制到不同 Agent 的本地 skill 目录。
 
@@ -215,7 +186,7 @@ mkdir -p ~/.claude/skills/ppt-library
 rsync -a skills/ppt-library/ ~/.claude/skills/ppt-library/
 ```
 
-其他 Agent 可以把 `skills/ppt-library/SKILL.md` 作为任务上下文注入，或复制整个 `skills/ppt-library/` 目录。
+其他 Agent 可把 `skills/ppt-library/SKILL.md` 作为任务上下文注入，或复制整个 `skills/ppt-library/` 目录到对应的本地 skills 目录。
 
 安装后可用这个 smoke prompt 验证：
 
@@ -225,14 +196,13 @@ Use the ppt-library skill. Check whether PPT Library is usable on this machine w
 
 不同 Agent 的适配说明见 [Agent Adapters](skills/ppt-library/references/agent-adapters.md)。
 
-## 常用命令
+## Common Workflows
 
 | 目标 | 命令 |
 |---|---|
-| 查看版本 | `ppt-lib --version` |
+| 检查 CLI | `ppt-lib --version` |
 | 初始化配置 | `ppt-lib setup --quick --non-interactive` |
 | 查看健康状态 | `ppt-lib doctor --output json` |
-| 查看能力声明 | `ppt-lib capabilities --output json` |
 | 查看索引状态 | `ppt-lib status --output json` |
 | 索引单个文件 | `ppt-lib index /path/to/deck.pptx` |
 | 按资料源建库 | `ppt-lib index --from-sources` |
@@ -249,10 +219,37 @@ Use the ppt-library skill. Check whether PPT Library is usable on this machine w
 | 按战绩增强搜索 | `ppt-lib search "查询内容" --ranking business --output json` |
 | 自动组装预览 | `ppt-lib compose --brief "..." --dry-run` |
 | 按确认计划组装 | `ppt-lib compose --confirm /path/to/narrative-plan.json` |
-| 启动 Workbench | `ppt-lib workbench start --host 127.0.0.1 --port 8765` |
-| 查看 Workbench 状态 | `ppt-lib workbench status --output json` |
 
-## 数据和隐私
+## Version-Aware Search
+
+PPT 项目经常会有几十个版本。PPT Library 会把相似文件归入同一个 deck family，并标记代表版本。
+
+默认搜索只展示代表版本，减少同一项目不同版本反复刷屏：
+
+```bash
+ppt-lib search "长周期项目复盘"
+```
+
+需要审计历史版本时再展开：
+
+```bash
+ppt-lib search "长周期项目复盘" --include-versions
+ppt-lib versions inspect <family-id>
+```
+
+代表版本只是默认搜索视图，历史版本仍保留在本地库中。
+
+## Configuration
+
+PPT Library 会优先使用本地能力。配置 embedding 模型后，搜索质量会从文本匹配升级为语义检索。
+
+- OpenAI-compatible API：设置 `PPT_LIB_OPENAI_API_KEY` 或配置 `embedding_api_url`。
+- LM Studio：启动本地 OpenAI-compatible 服务后运行 `ppt-lib setup --quick`。
+- Ollama：配置 OpenAI-compatible endpoint 和对应 embedding 模型。
+
+更多说明见 [Quick Start Guide](docs/quick-start-guide.md) 和 [Model Compatibility](docs/guides/model-compatibility.md)。
+
+## Data and Privacy
 
 PPT Library 默认将数据保存在本机 `~/.ppt-library/`：
 
@@ -261,24 +258,19 @@ PPT Library 默认将数据保存在本机 `~/.ppt-library/`：
 - 搜索 HTML 预览
 - 组装清单和本地产物
 
-公开仓库不包含真实 PPT、真实客户资料、样本截图或本地数据库。使用时请确认 `.pptx`、`.db`、`.env`、截图和导出产物不进入公开提交。
+公开仓库不包含真实 PPT、真实客户资料、样本截图或本地数据库。使用时请确认 `.pptx`、`.db`、`.env`、截图和导出产物不要提交到公开仓库。
 
-## 文档
+## Documentation
 
 - [Quick Start Guide](docs/quick-start-guide.md)
-- [v2.0.0 Release Notes](docs/releases/v2.0.0.md)
-- [v1.5-v2.0 Iteration Report](docs/iterations/v1.5-v2.0-iteration-report.md)
-- [Spec Pack](docs/ppt-library-v1.5-v2.0-spec-pack/README.md)
-- [Asset Intelligence Demo](docs/guides/asset-intelligence-demo.md)
 - [Library Build Guideline](docs/guides/library-build-guideline.md)
-- [Agent Install and Guided Library Build](docs/guides/agent-install-and-build-guideline.md)
-- [Model Compatibility](docs/guides/model-compatibility.md)
-- [Recommended Implementation](docs/guides/recommended-implementation.md)
+- [Asset Intelligence Demo](docs/guides/asset-intelligence-demo.md)
 - [Open Source Release Checklist](docs/guides/open-source-release-checklist.md)
+- [Model Compatibility](docs/guides/model-compatibility.md)
+- [Agent Adapters](skills/ppt-library/references/agent-adapters.md)
 - [Specs](docs/specs/README.md)
-- [ADR](docs/adr/001-stable-asset-identity.md)
 
-## 开发和验证
+## Development
 
 ```bash
 uv run --extra test pytest
@@ -288,20 +280,7 @@ uv run python scripts/release_check.py --output json
 uv build
 ```
 
-v2.0.0 公开快照验证基线：
-
-- 1083 automated tests
-- ruff clean
-- mypy clean
-- `uv build` 产出 `ppt_library-2.0.0`
-- `release_check` 覆盖 metadata、pytest、ruff、mypy、build、demo smoke
-
-## 已知限制
-
-- Job Engine 的 `jobs list/inspect/cancel` 主 CLI 入口还未接入。
-- Workbench 的 search/asset/health 详情页面仍在后续版本补齐。
-- Postgres backend、OIDC、生产部署工具后续迭代。
-- Visual pHash 和 palette 仍是占位实现，需要后续接入渲染图像流水线。
+当前测试基线：1083 automated tests。
 
 ## License
 

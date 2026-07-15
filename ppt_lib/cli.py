@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -25,6 +26,12 @@ from ppt_lib.config import (
     settings_summary,
     write_setup_config,
 )
+from ppt_lib.contracts.errors import (
+    CONTRACT_VALIDATION_FAILED,
+    INVALID_INPUT,
+    SEARCH_BACKEND_UNAVAILABLE,
+)
+from ppt_lib.contracts.registry import build_envelope_v2, get_registry
 from ppt_lib.db import (
     DatabaseError,
     connect,
@@ -57,10 +64,11 @@ from ppt_lib.metadata import MetadataJsonlError, export_metadata_jsonl, import_m
 from ppt_lib.model_compat import detect_lmstudio_chat_model
 from ppt_lib.pptx_package import PptxPackageError
 from ppt_lib.profile import build_workspace_profile_payload
-from ppt_lib.prune import prune_orphans, purge_assembled_output
+from ppt_lib.prune import prune_orphan_slide_artifacts, prune_orphans, purge_assembled_output
 from ppt_lib.sample_qa import SampleQaManifestError, run_local_sample_qa
 from ppt_lib.searcher import SearchError, SearchOptions, search
 from ppt_lib.selector import NARRATIVE_ROLES, record_selection_usage, select_slides, select_slides_from_plan
+from ppt_lib.services.app_services import LibraryService
 from ppt_lib.setup_probe import detect_environment, recommend_setup
 from ppt_lib.sources import (
     ALLOWED_SOURCE_ROLES,
@@ -104,6 +112,11 @@ def build_envelope(
     }
 
 
+def _is_native_v2_envelope(payload: dict[str, object]) -> bool:
+    meta = payload.get("_meta")
+    return isinstance(meta, dict) and meta.get("envelope") == "ppt_library.envelope.v2"
+
+
 def _output_mode(args: argparse.Namespace) -> str:
     requested = getattr(args, "output", "auto")
     if requested == "json":
@@ -123,6 +136,9 @@ def _print_command_output(
     schema_version: str,
     output_mode: str,
 ) -> None:
+    if _is_native_v2_envelope(payload):
+        print(json.dumps(payload, default=_json_default))
+        return
     if output_mode == "text":
         text = _human_output(command, payload, errors)
         if text is not None:
@@ -270,6 +286,11 @@ def build_parser() -> argparse.ArgumentParser:
     search_parser.add_argument("--cluster", action="store_true")
     search_parser.add_argument("--html", action="store_true")
     search_parser.add_argument("--output", choices=["auto", "text", "json"], default="auto")
+    search_parser.add_argument(
+        "--contract-v2",
+        action="store_true",
+        help="emit the native search-response.v2 machine envelope",
+    )
     search_parser.add_argument("--include-assembled", action="store_true")
     search_parser.add_argument("--dedupe-lineage", action="store_true")
     search_parser.add_argument("--ranking", choices=["classic", "business"], default="classic")
@@ -452,8 +473,18 @@ def build_parser() -> argparse.ArgumentParser:
     select_parser.add_argument("--ranking", choices=["classic", "business"], default="classic")
     select_parser.add_argument("--threshold", type=float, default=0.0)
     select_parser.add_argument("--output", help="write selection-report to file instead of stdout")
-    select_parser.add_argument("--contract", choices=["default", "deck-master.v1"], default="default")
-    select_parser.add_argument("--run-id", help="Deck Master run id; required with --contract deck-master.v1")
+    select_parser.add_argument("--scope", choices=["all", "active"])
+    select_parser.add_argument(
+        "--contract",
+        choices=["default", "deck-master.v1", "deck-master.v2"],
+        default="default",
+    )
+    select_parser.add_argument("--run-id", help="Deck Master run id; required with a Deck Master contract")
+    select_parser.add_argument(
+        "--replace-existing",
+        action="store_true",
+        help="replace a changed v2 selection for the same run",
+    )
     select_parser.add_argument("--record-usage", action="store_true", help="write slide_usage for top-1 per role")
     select_parser.add_argument("--deal-id", type=int, help="deal ID for --record-usage")
 
@@ -502,7 +533,12 @@ def build_parser() -> argparse.ArgumentParser:
     contract_validate_parser = contract_subparsers.add_parser("validate", help="validate data against a contract")
     contract_validate_parser.add_argument("name")
     contract_validate_parser.add_argument("--data", required=True, help="JSON file or inline JSON string to validate")
-    contract_validate_parser.add_argument("--strict", action="store_true", default=True, help="reject additional properties")
+    contract_validate_parser.add_argument(
+        "--strict",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="reject additional root properties (use --no-strict for compatibility mode)",
+    )
     contract_validate_parser.add_argument("--output", choices=["auto", "text", "json"], default="auto")
 
     # --- v1.8: Workbench ---
@@ -511,7 +547,30 @@ def build_parser() -> argparse.ArgumentParser:
     workbench_start_parser = workbench_subparsers.add_parser("start", help="start the workbench API server")
     workbench_start_parser.add_argument("--host", default="127.0.0.1")
     workbench_start_parser.add_argument("--port", type=int, default=8899)
+    workbench_start_parser.add_argument(
+        "--allow-remote",
+        action="store_true",
+        help="allow remote whole-library administrator access",
+    )
+    workbench_start_parser.add_argument(
+        "--auth-token-env",
+        help="environment variable containing the shared whole-library administrator token",
+    )
+    workbench_start_parser.add_argument(
+        "--cors-origin",
+        action="append",
+        dest="cors_origins",
+        help="trusted browser origin for remote Workbench access; repeat for multiple origins",
+    )
+    workbench_start_parser.add_argument(
+        "--workspace",
+        default="default",
+        help="single-process namespace label; does not provide multi-tenant isolation",
+    )
     workbench_status_parser = workbench_subparsers.add_parser("status", help="check workbench server status")
+    workbench_status_parser.add_argument("--host", default="127.0.0.1")
+    workbench_status_parser.add_argument("--port", type=int, default=8899)
+    workbench_status_parser.add_argument("--auth-token-env", help="environment variable containing the bearer token")
     workbench_status_parser.add_argument("--output", choices=["auto", "text", "json"], default="auto")
 
     return parser
@@ -830,6 +889,8 @@ def _dispatch(args: argparse.Namespace, settings) -> tuple[dict[str, object], li
             )
         return payload, errors
     if args.command == "search":
+        if args.contract_v2:
+            return _search_v2(args, settings)
         try:
             search_results = search(
                 args.query,
@@ -924,6 +985,8 @@ def _dispatch(args: argparse.Namespace, settings) -> tuple[dict[str, object], li
             return {"result": review_pack_result}, []
         raise ValueError(f"Unknown insights subcommand: {args.insights_command}")
     if args.command == "status":
+        from ppt_lib.readiness import build_readiness
+
         conn = connect(settings.db_path)
         init_db(conn)
         status_stats = get_stats(conn)
@@ -947,6 +1010,7 @@ def _dispatch(args: argparse.Namespace, settings) -> tuple[dict[str, object], li
             "failed_jobs": [_dataclass_to_json(job) for job in list_failed_jobs(conn)],
             "orphan_presentations": [_dataclass_to_json(item) for item in list_orphan_presentations(conn)],
             "sources_health": _sources_health(settings),
+            "readiness": build_readiness(conn, settings),
         }, []
     if args.command == "discover":
         try:
@@ -960,12 +1024,17 @@ def _dispatch(args: argparse.Namespace, settings) -> tuple[dict[str, object], li
         }, []
     if args.command == "watch":
         try:
-            watch_directory(_normalize_path(Path(args.root)), settings, lambda path: index_file(path, settings))
+            watch_errors = watch_directory(
+                _normalize_path(Path(args.root)),
+                settings,
+                lambda path: index_file(path, settings),
+            ) or []
         except WatchRuntimeError as exc:
             return {"status": "stopped"}, [ErrorRecord(exc.code, str(exc), "watch")]
         except FileNotFoundError as exc:
             return {"status": "failed"}, [ErrorRecord("WATCH_ROOT_NOT_FOUND", str(exc), "watch")]
-        return {"status": "completed"}, []
+        status = "completed_with_errors" if watch_errors else "completed"
+        return {"status": status}, watch_errors
     if args.command == "vision":
         return run_diagnostics(settings).to_json(), []
     if args.command == "models":
@@ -1080,8 +1149,8 @@ def _dispatch(args: argparse.Namespace, settings) -> tuple[dict[str, object], li
         from ppt_lib.annotator import annotate_batch
 
         conn = connect(settings.db_path)
-        init_db(conn)
         try:
+            init_db(conn)
             batch_result = annotate_batch(
                 conn,
                 settings,
@@ -1092,6 +1161,8 @@ def _dispatch(args: argparse.Namespace, settings) -> tuple[dict[str, object], li
             )
         except Exception as exc:
             return {"result": None}, [ErrorRecord("ANNOTATE_ERROR", str(exc), "annotator")]
+        finally:
+            conn.close()
         output = {
             "annotated": len(batch_result.results),
             "errors": len(batch_result.errors),
@@ -1112,8 +1183,82 @@ def _dispatch(args: argparse.Namespace, settings) -> tuple[dict[str, object], li
                 output["output_path"] = str(out_path)
         if batch_result.errors:
             output["error_details"] = [{"slide_id": sid, "error": msg} for sid, msg in batch_result.errors]
+            code = "ANNOTATE_PARTIAL" if batch_result.results else "ANNOTATE_FAILED"
+            severity = "warning" if batch_result.results else "error"
+            message = (
+                f"{len(batch_result.errors)} slide annotation(s) failed; "
+                f"{len(batch_result.results)} succeeded."
+            )
+            return {"result": output}, [ErrorRecord(code, message, "annotator", severity=severity)]
         return {"result": output}, []
     if args.command == "select-slides":
+        if args.contract == "deck-master.v2":
+            from ppt_lib.deck_master_bridge import (
+                DeckMasterBridgeError,
+                build_deck_master_selection_v2,
+                write_selection_v2_atomic,
+            )
+
+            if not args.run_id:
+                return {"selection": None}, [
+                    ErrorRecord(
+                        "SELECT_SLIDES_ERROR",
+                        "--run-id is required with --contract deck-master.v2.",
+                        "select-slides",
+                    )
+                ]
+            if not args.plan:
+                return {"selection": None}, [
+                    ErrorRecord(
+                        "SELECT_SLIDES_ERROR",
+                        "--plan is required with --contract deck-master.v2.",
+                        "select-slides",
+                    )
+                ]
+            if args.scope != "active":
+                return {"selection": None}, [
+                    ErrorRecord(
+                        "SELECT_SLIDES_ERROR",
+                        "deck-master.v2 requires --scope active.",
+                        "select-slides",
+                    )
+                ]
+            if args.record_usage:
+                return {"selection": None}, [
+                    ErrorRecord(
+                        "SELECT_SLIDES_ERROR",
+                        "deck-master.v2 does not write usage during selection.",
+                        "select-slides",
+                    )
+                ]
+            try:
+                selection = build_deck_master_selection_v2(
+                    settings,
+                    plan_path=_normalize_path(Path(args.plan)),
+                    run_id=args.run_id,
+                    max_per_role=args.max_per_role,
+                    ranking=args.ranking,
+                    threshold=args.threshold,
+                )
+                if args.output:
+                    out = _normalize_path(Path(args.output))
+                    write_status = write_selection_v2_atomic(
+                        out,
+                        selection,
+                        replace_existing=args.replace_existing,
+                    )
+                    selection_items = selection.get("selections", [])
+                    return {
+                        "contract_path": str(out),
+                        "schema_version": selection["schema_version"],
+                        "run_id": args.run_id,
+                        "selection_count": len(selection_items) if isinstance(selection_items, list) else 0,
+                        "gaps": selection["gaps"],
+                        "write_status": write_status,
+                    }, []
+                return selection, []
+            except DeckMasterBridgeError as exc:
+                return {"selection": None}, [ErrorRecord(exc.code, str(exc), "deck-master-bridge")]
         try:
             if args.contract == "deck-master.v1" and not args.run_id:
                 return {
@@ -1127,6 +1272,7 @@ def _dispatch(args: argparse.Namespace, settings) -> tuple[dict[str, object], li
                     max_per_role=args.max_per_role,
                     ranking=args.ranking,
                     threshold=args.threshold,
+                    scope=args.scope or "all",
                 )
             elif args.roles:
                 roles = [role.strip() for role in args.roles.split(",") if role.strip()]
@@ -1138,6 +1284,7 @@ def _dispatch(args: argparse.Namespace, settings) -> tuple[dict[str, object], li
                     max_per_role=args.max_per_role,
                     ranking=args.ranking,
                     threshold=args.threshold,
+                    scope=args.scope or "all",
                 )
             else:
                 return {
@@ -1160,7 +1307,6 @@ def _dispatch(args: argparse.Namespace, settings) -> tuple[dict[str, object], li
             contract_json = _selection_report_to_deck_master_contract(
                 report,
                 run_id=args.run_id,
-                plan_path=_normalize_path(Path(args.plan)) if args.plan else None,
             )
             if args.output:
                 out = _normalize_path(Path(args.output))
@@ -1252,7 +1398,7 @@ def _dispatch(args: argparse.Namespace, settings) -> tuple[dict[str, object], li
                     industry=args.industry,
                     max_per_role=args.max_per_role,
                     ranking=args.ranking,
-                    dry_run=args.dry_run,
+                    dry_run=args.dry_run or not args.auto,
                     overwrite=args.overwrite,
                     deal_id=args.deal_id,
                     verbose=args.verbose,
@@ -1271,6 +1417,11 @@ def _dispatch(args: argparse.Namespace, settings) -> tuple[dict[str, object], li
                 compose_payload["assemble_status"] = compose_result.assemble_report.status
             if compose_result.timings.total_ms:
                 compose_payload["timings_ms"] = compose_result.timings.total_ms
+            if compose_result.assemble_report and compose_result.assemble_report.status == "failed":
+                message = "; ".join(compose_result.assemble_report.errors) or "Compose assembly failed."
+                return {"result": compose_payload}, [
+                    ErrorRecord("COMPOSE_ASSEMBLE_FAILED", message, "compose")
+                ]
             return {"result": compose_payload}, []
         except (SearchError, EmbeddingProviderError, ValueError, OSError) as exc:
             return {"result": None}, [ErrorRecord("COMPOSE_ERROR", str(exc), "compose")]
@@ -1324,34 +1475,97 @@ def _dispatch(args: argparse.Namespace, settings) -> tuple[dict[str, object], li
                     "valid": False,
                     "contract": args.name,
                     "errors": [e.to_json() for e in validation_errors],
-                }, []
+                }, [
+                    ErrorRecord(
+                        item.code,
+                        item.message,
+                        item.source_module or "contract",
+                        severity=item.severity,
+                    )
+                    for item in validation_errors
+                ]
             return {"valid": True, "contract": args.name, "errors": []}, []
 
     if args.command == "workbench":
         import urllib.request
         if args.workbench_command == "start":
+            auth_token, token_error = _auth_token_from_env(args.auth_token_env)
+            if token_error:
+                return {}, [ErrorRecord("WORKBENCH_AUTH_ERROR", token_error, "workbench")]
+            if not _is_loopback_host(args.host):
+                if not args.allow_remote:
+                    return {}, [
+                        ErrorRecord(
+                            "WORKBENCH_REMOTE_BIND_BLOCKED",
+                            "Non-loopback binding requires --allow-remote.",
+                            "workbench",
+                        )
+                    ]
+                if auth_token is None:
+                    return {}, [
+                        ErrorRecord(
+                            "WORKBENCH_AUTH_ERROR",
+                            "Non-loopback binding requires --auth-token-env with a non-empty value.",
+                            "workbench",
+                        )
+                    ]
             try:
                 from ppt_lib.api_server import APIConfig, create_api_app
+                config = APIConfig(
+                    host=args.host,
+                    port=args.port,
+                    db_path=settings.db_path,
+                    auth_token=auth_token,
+                    allow_remote=args.allow_remote,
+                    workspace_id=args.workspace,
+                    settings=settings,
+                    cors_origins=args.cors_origins,
+                )
+                app = create_api_app(config)
             except ImportError as exc:
                 return {}, [ErrorRecord("WORKBENCH_UNAVAILABLE", str(exc), "workbench")]
-            config = APIConfig(host=args.host, port=args.port, db_path=settings.db_path)
-            app = create_api_app(config)
+            except ValueError as exc:
+                return {}, [ErrorRecord("WORKBENCH_CONFIG_ERROR", str(exc), "workbench")]
             try:
                 import uvicorn
             except ImportError as exc:
                 return {}, [ErrorRecord("WORKBENCH_UNAVAILABLE", f"uvicorn not installed: {exc}", "workbench")]
-            print(f"Starting PPT Library Workbench on http://{args.host}:{args.port}")
-            print("Press Ctrl+C to stop.")
+            conn = connect(settings.db_path)
+            try:
+                init_db(conn, backups_dir=settings.backups_dir)
+            finally:
+                conn.close()
+            print(f"Starting PPT Library Workbench on http://{args.host}:{args.port}", file=sys.stderr)
+            print(
+                "Security: workspace is a single-process namespace label and does not provide multi-tenant isolation.",
+                file=sys.stderr,
+            )
+            if auth_token:
+                print(
+                    "Security: the bearer token is a shared administrator credential for the entire library database.",
+                    file=sys.stderr,
+                )
+            if not _is_loopback_host(args.host):
+                print(
+                    "Remote HTTP must stay on a trusted network or run behind a TLS reverse proxy or SSH tunnel.",
+                    file=sys.stderr,
+                )
+            print("Press Ctrl+C to stop.", file=sys.stderr)
             uvicorn.run(app, host=args.host, port=args.port, log_level="info")
             return {}, []
         if args.workbench_command == "status":
-            url = "http://127.0.0.1:8899/api/v1/health"
+            auth_token, token_error = _auth_token_from_env(args.auth_token_env)
+            if token_error:
+                return {}, [ErrorRecord("WORKBENCH_AUTH_ERROR", token_error, "workbench")]
+            url = f"http://{args.host}:{args.port}/api/v1/health"
+            headers = {"Authorization": f"Bearer {auth_token}"} if auth_token else {}
+            request = urllib.request.Request(url, headers=headers, method="GET")
             try:
-                with urllib.request.urlopen(url, timeout=2) as resp:
+                with urllib.request.urlopen(request, timeout=2) as resp:
                     data = json.loads(resp.read())
-                    return {"running": True, "health": data}, []
-            except Exception:
-                return {"running": False}, []
+                    return {"running": True, "endpoint": url, "health": data}, []
+            except Exception as exc:
+                return {"running": False, "endpoint": url, "error": str(exc)}, []
     raise ValueError(f"Unknown command: {args.command}")
 
 
@@ -1420,18 +1634,15 @@ def _selection_report_to_deck_master_contract(
     report,
     *,
     run_id: str,
-    plan_path: Path | None = None,
 ) -> dict[str, object]:
-    refs = _deck_master_selection_refs(report, plan_path)
     selections: list[dict[str, object]] = []
     for index, role_selection in enumerate(report.roles):
-        ref = refs[index] if index < len(refs) else {}
         role = role_selection.role
-        beat_id = str(ref.get("beat_id") or role or f"beat_{index + 1}")
+        beat_id = str(role_selection.beat_id or role or f"beat_{index + 1}")
         selections.append(
             {
                 "beat_id": beat_id,
-                "page_task_id": str(ref.get("page_task_id") or beat_id),
+                "page_task_id": str(role_selection.page_task_id or beat_id),
                 "role": role,
                 "candidates": [_search_result_to_json(slide) for slide in role_selection.slides],
             }
@@ -1441,47 +1652,86 @@ def _selection_report_to_deck_master_contract(
         "schema_version": "deck_master_ppt_library_selection.v1",
         "run_id": run_id,
         "source": "ppt-library",
-        "producer_version": _producer_version(),
+        "producer_version": _package_version(),
         "selections": selections,
         "gaps": report.gaps,
     }
 
 
-def _deck_master_selection_refs(report, plan_path: Path | None) -> list[dict[str, object]]:
-    if plan_path is None:
-        return [{"beat_id": role_selection.role, "page_task_id": role_selection.role} for role_selection in report.roles]
+def _search_v2(args: argparse.Namespace, settings) -> tuple[dict[str, object], list[ErrorRecord]]:
+    assert settings.db_path is not None
     try:
-        payload = json.loads(plan_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return [{"beat_id": role_selection.role, "page_task_id": role_selection.role} for role_selection in report.roles]
-    beats = payload.get("beats") if isinstance(payload, dict) else None
-    if isinstance(beats, list) and beats:
-        refs: list[dict[str, object]] = []
-        for index, beat in enumerate(beats):
-            if not isinstance(beat, dict):
-                continue
-            role = str(beat.get("role") or f"beat_{index + 1}")
-            beat_id = str(beat.get("beat_id") or beat.get("id") or role)
-            refs.append(
-                {
-                    "beat_id": beat_id,
-                    "page_task_id": str(beat.get("page_task_id") or beat_id),
-                    "role": role,
-                }
+        conn = connect(settings.db_path)
+        try:
+            init_db(conn, backups_dir=settings.backups_dir)
+            filters = {"narrative_role": args.narrative_role} if args.narrative_role else None
+            payload = LibraryService(conn, settings).search.search_v2(
+                args.query,
+                top_k=args.top_k,
+                profile_name="deck_master" if args.ranking == "business" else "default",
+                filters=filters,
             )
-        if refs:
-            return refs
-    roles = payload.get("roles") if isinstance(payload, dict) else None
-    if isinstance(roles, list):
-        return [{"beat_id": str(role), "page_task_id": str(role)} for role in roles]
-    return [{"beat_id": role_selection.role, "page_task_id": role_selection.role} for role_selection in report.roles]
+        finally:
+            conn.close()
+    except ValueError as exc:
+        record = ErrorRecord(INVALID_INPUT, str(exc), "services.search")
+        return _search_v2_error_envelope(record), [record]
+    except Exception as exc:
+        record = ErrorRecord(SEARCH_BACKEND_UNAVAILABLE, str(exc), "services.search")
+        return _search_v2_error_envelope(record), [record]
+
+    validation_errors = get_registry().validate("search-response.v2", payload, strict=True)
+    if validation_errors:
+        summary = "; ".join(item.message for item in validation_errors[:3])
+        record = ErrorRecord(
+            CONTRACT_VALIDATION_FAILED,
+            f"search-response.v2 validation failed: {summary}",
+            "contracts.registry",
+        )
+        return _search_v2_error_envelope(record), [record]
+
+    records: list[ErrorRecord] = []
+    raw_errors = payload.get("_errors")
+    if isinstance(raw_errors, list):
+        for item in raw_errors:
+            if not isinstance(item, dict):
+                continue
+            records.append(
+                ErrorRecord(
+                    str(item.get("code") or SEARCH_BACKEND_UNAVAILABLE),
+                    str(item.get("message") or "Search failed."),
+                    str(item.get("source_module") or "services.search"),
+                    str(item.get("severity") or "error"),
+                )
+            )
+    return payload, records
 
 
-def _producer_version() -> str:
-    try:
-        return metadata.version("ppt-library")
-    except metadata.PackageNotFoundError:
-        return "2.0.0"
+def _search_v2_error_envelope(record: ErrorRecord) -> dict[str, object]:
+    request_id = f"cli-{datetime.now(UTC).strftime('%Y%m%d%H%M%S%f')}"
+    return {
+        "_meta": build_envelope_v2(
+            "search",
+            "ppt_library.search_response.v2",
+            request_id=request_id,
+        ),
+        "data": {"candidates": [], "trace": None},
+        "_warnings": [],
+        "_errors": [_error_to_json(record)],
+    }
+
+
+def _auth_token_from_env(variable_name: str | None) -> tuple[str | None, str | None]:
+    if not variable_name:
+        return None, None
+    value = os.environ.get(variable_name)
+    if value is None or not value.strip():
+        return None, f"Environment variable '{variable_name}' is missing or empty."
+    return value, None
+
+
+def _is_loopback_host(host: str) -> bool:
+    return host.strip().lower() in {"127.0.0.1", "localhost", "::1"}
 
 
 def _manifest_from_selection_payload(
@@ -2680,6 +2930,7 @@ def _asset_counts(conn) -> dict[str, object]:
     counts: dict[str, object] = {
         "screenshots": _table_count(conn, "screenshots"),
         "slide_assets": _table_count(conn, "slide_assets"),
+        "slide_artifacts": _table_count(conn, "slide_artifacts"),
         "duplicate_groups": _table_count(conn, "duplicate_groups"),
         "duplicate_members": _table_count(conn, "slide_duplicate_members"),
     }
@@ -2688,65 +2939,25 @@ def _asset_counts(conn) -> dict[str, object]:
 
 def _assets_prune(settings, *, dry_run: bool) -> dict[str, object]:
     assert settings.db_path is not None
-    assert settings.home_dir is not None
     conn = connect(settings.db_path)
-    init_db(conn)
-    orphan_rows = conn.execute(
-        """
-        SELECT sa.id, sa.asset_uri
-        FROM slide_assets sa
-        LEFT JOIN slides s ON s.id = sa.slide_id
-        WHERE s.id IS NULL
-        ORDER BY sa.id
-        """
-    ).fetchall()
-    candidate_files: list[str] = []
-    deleted_files: list[str] = []
-    deletable_ids: list[int] = []
-    unsafe_count = 0
-    for row_id, asset_uri in orphan_rows:
-        path = _safe_asset_path(settings, str(asset_uri))
-        if path is None:
-            unsafe_count += 1
-            continue
-        deletable_ids.append(int(row_id))
-        candidate_files.append(str(_normalize_path(path)))
-        if not dry_run and path.is_file():
-            path.unlink()
-            deleted_files.append(str(_normalize_path(path)))
-
-    deleted_rows = 0
-    if not dry_run and deletable_ids:
-        placeholders = ",".join("?" for _ in deletable_ids)
-        cursor = conn.execute(f"DELETE FROM slide_assets WHERE id IN ({placeholders})", deletable_ids)
-        deleted_rows = int(cursor.rowcount if cursor.rowcount != -1 else 0)
-        conn.commit()
-
-    result = _asset_counts(conn)
-    result.update(
-        {
-            "dry_run": dry_run,
-            "orphan_slide_assets": len(orphan_rows),
-            "unsafe_orphan_slide_assets": unsafe_count,
-            "deleted": deleted_rows,
-            "candidate_files": candidate_files,
-            "deleted_files": deleted_files,
-        }
-    )
-    return {"result": result}
-
-
-def _safe_asset_path(settings, asset_uri: str) -> Path | None:
-    if "://" in asset_uri:
-        return None
-    assert settings.home_dir is not None
-    home_dir = _normalize_path(settings.home_dir)
-    raw_path = Path(asset_uri)
-    path = _normalize_path(raw_path if raw_path.is_absolute() else home_dir / raw_path)
-    safe_roots = [home_dir / "assets", home_dir / "thumbnails"]
-    if not any(path == root or root in path.parents for root in safe_roots):
-        return None
-    return path
+    try:
+        init_db(conn)
+        prune_result = prune_orphan_slide_artifacts(conn, settings, dry_run=dry_run)
+        result = _asset_counts(conn)
+        result.update(
+            {
+                "dry_run": dry_run,
+                "orphan_slide_assets": prune_result.orphan_count,
+                "unsafe_orphan_slide_assets": prune_result.unsafe_count,
+                "deleted": prune_result.deleted_count,
+                "candidate_files": prune_result.candidate_files,
+                "deleted_files": prune_result.deleted_files,
+                "warnings": prune_result.warnings,
+            }
+        )
+        return {"result": result}
+    finally:
+        conn.close()
 
 
 def _build_deal_notes(
@@ -2864,7 +3075,7 @@ def _package_version() -> str:
     try:
         return metadata.version("ppt-library")
     except metadata.PackageNotFoundError:
-        return "0.1.0"
+        return "0+unknown"
 
 
 if __name__ == "__main__":

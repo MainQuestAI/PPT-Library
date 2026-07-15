@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 from ppt_lib.reranker import (
     DEFAULT_EGRESS_POLICY,
     EgressPolicy,
@@ -220,3 +222,29 @@ class TestApplyRerank:
         assert trace["fallback_used"] is True
         assert trace["egress"] == "error"
         assert len(results) == 3  # fallback to noop
+
+    def test_provider_timeout_falls_back(self):
+        class SlowReranker(RerankerProvider):
+            def name(self) -> str:
+                return "slow"
+
+            def is_local(self) -> bool:
+                return True
+
+            def is_available(self) -> bool:
+                return True
+
+            def rerank(self, query, candidates, *, top_n=10):
+                time.sleep(0.05)
+                return [RerankResult(c.slide_id, c.score, c.score, c.title) for c in candidates[:top_n]]
+
+        results, trace = apply_rerank(
+            "query",
+            self._make_candidates(),
+            provider=SlowReranker(),
+            timeout_seconds=0.001,
+        )
+
+        assert len(results) == 3
+        assert trace["fallback_used"] is True
+        assert trace["egress"] == "timeout"

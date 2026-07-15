@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import ppt_lib.assemble_ingest as assemble_ingest_module
 import ppt_lib.assembler as assembler_module
 from ppt_lib.assembler import (
     AssembleFidelityReport,
@@ -200,6 +201,156 @@ def test_run_assemble_skips_unrenderable_slides_when_complex_policy_is_skip(tmp_
     assert report.skipped_slides[0].status == "skipped"
     report_json = json.loads(report.report_path.read_text(encoding="utf-8"))
     assert report_json["skipped_slides"][0]["source_page_number"] == 2
+
+
+def test_run_assemble_keeps_provenance_when_middle_slide_is_skipped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = write_minimal_pptx(tmp_path / "source.pptx")
+    output = tmp_path / "assembled" / "output.pptx"
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "run_name": "skip-middle",
+                "output": {"path": str(output), "overwrite": True},
+                "options": {"on_complex_slide": "skip", "render_fidelity_baseline": False},
+                "slides": [
+                    {"source_file": str(source), "page_number": 1, "source_slide_id": 101},
+                    {"source_file": str(source), "page_number": 2, "source_slide_id": 102},
+                    {
+                        "source_file": str(source),
+                        "page_number": 3,
+                        "source_slide_id": 103,
+                        "risk_policy": "manual_review_required",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        assembler_module,
+        "_slide_render_preflight",
+        lambda slide: ["cannot render"] if slide.page_number == 2 else [],
+    )
+
+    def fake_copy(slides: list[tuple[Path, int]], output_path: Path) -> list[CopiedSlide]:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"pptx")
+        return [
+            CopiedSlide(path, page, index, "copied", [], [])
+            for index, (path, page) in enumerate(slides, start=1)
+        ]
+
+    monkeypatch.setattr(assembler_module, "copy_slides_to_new_pptx", fake_copy)
+
+    report = run_assemble(load_assemble_manifest(manifest_path))
+
+    assert [(slide.output_page_number, slide.source_slide_id) for slide in report.slides] == [(1, 101), (2, 103)]
+    assert report.slides[1].risk_policy == "manual_review_required"
+    assert report.status == "partial"
+
+
+def test_run_assemble_honors_manual_review_risk_policy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = write_minimal_pptx(tmp_path / "source.pptx")
+    manifest_path = write_manifest(tmp_path, source)
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["slides"][0]["risk_policy"] = "manual_review_required"
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    report = run_assemble(load_assemble_manifest(manifest_path))
+
+    assert report.slides[0].risk_policy == "manual_review_required"
+    assert report.status == "needs_manual_review"
+
+
+def test_lineage_uses_report_provenance_after_middle_skip(tmp_path: Path) -> None:
+    from ppt_lib.db import PresentationRecord, SlideRecord, connect, init_db, upsert_presentation, upsert_slide
+
+    conn = connect(tmp_path / "index.db")
+    init_db(conn)
+    source_path = tmp_path / "source.pptx"
+    source_presentation_id = upsert_presentation(
+        conn,
+        PresentationRecord(source_path, source_path.name, None, 3, "source", 100, 1.0),
+    )
+    source_ids = [
+        upsert_slide(
+            conn,
+            SlideRecord(
+                presentation_id=source_presentation_id,
+                slide_index=index,
+                title=f"Source {index + 1}",
+                text_content="source",
+                embedding=None,
+                screenshot_hash=None,
+                source="text_extraction",
+                extraction_warnings=[],
+                metadata_json={},
+            ),
+        )
+        for index in range(3)
+    ]
+    output_path = tmp_path / "output.pptx"
+    output_presentation_id = upsert_presentation(
+        conn,
+        PresentationRecord(output_path, output_path.name, None, 2, "output", 100, 1.0),
+    )
+    output_ids = [
+        upsert_slide(
+            conn,
+            SlideRecord(
+                presentation_id=output_presentation_id,
+                slide_index=index,
+                title=f"Output {index + 1}",
+                text_content="output",
+                embedding=None,
+                screenshot_hash=None,
+                source="text_extraction",
+                extraction_warnings=[],
+                metadata_json={},
+            ),
+        )
+        for index in range(2)
+    ]
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "run_name": "skip-middle-lineage",
+                "output": {"path": str(output_path), "overwrite": True},
+                "slides": [
+                    {"source_file": str(source_path), "page_number": index + 1, "source_slide_id": source_id}
+                    for index, source_id in enumerate(source_ids)
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifest = load_assemble_manifest(manifest_path)
+    report = AssembleReport(
+        schema_version="1.0",
+        run_id="run-1",
+        status="partial",
+        output_path=output_path,
+        slide_count=2,
+        slides=[
+            AssembleSlideReport(1, str(source_path), 1, "copied", "low", [], source_ids[0]),
+            AssembleSlideReport(2, str(source_path), 3, "copied", "low", [], source_ids[2]),
+        ],
+        errors=[],
+        fidelity=AssembleFidelityReport("", "", True, []),
+    )
+    run_id = assemble_ingest_module._create_assemble_run(conn, manifest, report, status="partial")
+
+    count, warnings = assemble_ingest_module._insert_lineage(conn, report, output_presentation_id, run_id)
+
+    assert count == 2
+    assert warnings == []
+    rows = conn.execute(
+        "SELECT derived_slide_id, source_slide_id FROM slide_lineage ORDER BY derived_slide_id"
+    ).fetchall()
+    assert rows == [(output_ids[0], source_ids[0]), (output_ids[1], source_ids[2])]
 
 
 def test_run_assemble_does_not_overwrite_existing_output_when_disabled(tmp_path: Path) -> None:
@@ -411,6 +562,8 @@ def test_assemble_report_dataclass_contract() -> None:
                 status="copied",
                 risk_level="medium",
                 warnings=["visual review required"],
+                source_slide_id=123,
+                risk_policy="manual_review_required",
             )
         ],
         errors=[],
@@ -424,6 +577,7 @@ def test_assemble_report_dataclass_contract() -> None:
 
     assert report.schema_version == "1.0"
     assert report.slides[0].source_page_number == 7
+    assert report.slides[0].source_slide_id == 123
     assert report.fidelity.manual_review_required is True
 
 

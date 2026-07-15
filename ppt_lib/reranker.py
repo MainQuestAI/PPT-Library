@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import time
 from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 
 
@@ -224,13 +226,23 @@ def apply_rerank(
         return results, trace
 
     start = time.monotonic()
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ppt-lib-rerank")
     try:
-        results = provider.rerank(query, candidates, top_n=top_n)
+        future = executor.submit(provider.rerank, query, candidates, top_n=top_n)
+        results = future.result(timeout=max(0.0, timeout_seconds))
         duration_ms = int((time.monotonic() - start) * 1000)
         trace["provider"] = provider.name()
         trace["egress"] = "local" if provider.is_local() else "cloud"
         trace["duration_ms"] = duration_ms
         return results, trace
+    except FutureTimeoutError:
+        duration_ms = int((time.monotonic() - start) * 1000)
+        trace["provider"] = provider.name()
+        trace["fallback_used"] = True
+        trace["egress"] = "timeout"
+        trace["duration_ms"] = duration_ms
+        noop = NoopReranker()
+        return noop.rerank(query, candidates, top_n=top_n), trace
     except Exception:
         duration_ms = int((time.monotonic() - start) * 1000)
         trace["provider"] = provider.name()
@@ -240,3 +252,5 @@ def apply_rerank(
         noop = NoopReranker()
         results = noop.rerank(query, candidates, top_n=top_n)
         return results, trace
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)

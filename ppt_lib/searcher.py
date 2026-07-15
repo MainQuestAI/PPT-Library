@@ -35,6 +35,7 @@ class SearchOptions:
     include_cache: bool = False
     include_duplicates: bool = False
     include_versions: bool = False
+    scope: Literal["all", "active"] = "all"
 
 
 @dataclass(frozen=True)
@@ -137,9 +138,11 @@ def search(
             include_cache=options.include_cache,
             include_duplicates=options.include_duplicates,
             include_versions=options.include_versions,
+            scope=options.scope,
         )
         if not rows:
-            _raise_if_only_dimension_mismatch(conn, settings.embedding_dimensions)
+            if options.scope == "all":
+                _raise_if_only_dimension_mismatch(conn, settings.embedding_dimensions)
             return []
 
         provider = provider or build_embedding_provider(settings)
@@ -216,6 +219,7 @@ def load_search_rows(
     include_cache: bool = False,
     include_duplicates: bool = False,
     include_versions: bool = False,
+    scope: Literal["all", "active"] = "all",
 ) -> list[_SearchRow]:
     slide_columns = _table_columns(conn, "slides")
     has_raw_text = "raw_text" in slide_columns
@@ -298,6 +302,17 @@ def load_search_rows(
     if has_versions and not include_versions:
         version_filter = "AND (pv.id IS NULL OR pv.is_representative = 1)"
 
+    active_filter = ""
+    if scope == "active":
+        active_filter = """
+          AND EXISTS (
+            SELECT 1
+            FROM presentation_source_links psl
+            JOIN library_sources ls ON ls.id = psl.library_source_id
+            WHERE psl.presentation_id = p.id AND ls.is_active = 1
+          )
+        """
+
     rows = conn.execute(
         f"""
         SELECT
@@ -313,6 +328,7 @@ def load_search_rows(
           {canonical_filter}
           {version_filter}
           {narrative_filter}
+          {active_filter}
         """,
         params,
     ).fetchall()

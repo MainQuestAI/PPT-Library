@@ -3,13 +3,248 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from ppt_lib.cli import main
 from ppt_lib.indexer import ErrorRecord, IndexResult
-from ppt_lib.sources import classify_source_path
+from ppt_lib.sources import (
+    SourceError,
+    SourceProfile,
+    add_source,
+    classify_source_path,
+    collect_pptx_files,
+    load_index_progress_state,
+    load_scan_state,
+    load_sources_manifest,
+    load_sources_profile,
+    normalize_role,
+    parse_sources_manifest_payload,
+    risky_source_details,
+    scan_sources,
+    scan_state_path_for_home,
+    source_profile_hash,
+    validate_scan_state_for_index,
+)
 
 
 def _read_json(capsys):
     return json.loads(capsys.readouterr().out)
+
+
+def test_source_validation_rejects_invalid_roles_and_manifest_shapes(tmp_path: Path) -> None:
+    with pytest.raises(SourceError) as role_error:
+        normalize_role("unknown")
+    assert role_error.value.code == "SOURCE_ROLE_INVALID"
+
+    invalid_payloads = [
+        None,
+        {"sources": []},
+        {},
+        {"library": "not-a-list"},
+        {"library": [{"label": "missing-path"}]},
+        {"library": [123]},
+    ]
+    for payload in invalid_payloads:
+        with pytest.raises(SourceError) as manifest_error:
+            parse_sources_manifest_payload(payload)
+        assert manifest_error.value.code == "SOURCE_MANIFEST_INVALID"
+
+    missing_manifest = tmp_path / "missing.json"
+    with pytest.raises(SourceError) as missing_error:
+        load_sources_manifest(missing_manifest)
+    assert missing_error.value.code == "SOURCE_MANIFEST_READ_FAILED"
+
+    invalid_manifest = tmp_path / "invalid.json"
+    invalid_manifest.write_text("{", encoding="utf-8")
+    with pytest.raises(SourceError) as invalid_error:
+        load_sources_manifest(invalid_manifest)
+    assert invalid_error.value.code == "SOURCE_MANIFEST_INVALID"
+
+
+def test_source_manifest_list_normalizes_blanks_dicts_and_duplicates(tmp_path: Path) -> None:
+    deck = tmp_path / "deck.pptx"
+
+    profile = parse_sources_manifest_payload([" ", {"path": str(deck)}, str(deck)])
+
+    assert profile.baseline == [str(deck.resolve())]
+    assert profile.library == []
+
+
+def test_sources_profile_and_state_loaders_reject_invalid_json_shapes(tmp_path: Path) -> None:
+    profile_path = tmp_path / "sources" / "profile"
+    profile_path.parent.mkdir(parents=True)
+    profile_path.write_text("{", encoding="utf-8")
+    with pytest.raises(SourceError) as profile_json_error:
+        load_sources_profile(tmp_path)
+    assert profile_json_error.value.code == "SOURCE_PROFILE_INVALID"
+
+    profile_path.write_text("[]", encoding="utf-8")
+    with pytest.raises(SourceError) as profile_shape_error:
+        load_sources_profile(tmp_path)
+    assert profile_shape_error.value.code == "SOURCE_PROFILE_INVALID"
+
+    profile_path.write_text(json.dumps({"library": [123]}), encoding="utf-8")
+    with pytest.raises(SourceError) as profile_item_error:
+        load_sources_profile(tmp_path)
+    assert profile_item_error.value.code == "SOURCE_PROFILE_INVALID"
+
+    index_state = tmp_path / "sources" / "index-progress.json"
+    index_state.write_text("{", encoding="utf-8")
+    with pytest.raises(SourceError) as index_json_error:
+        load_index_progress_state(tmp_path)
+    assert index_json_error.value.code == "SOURCE_INDEX_PROGRESS_INVALID"
+
+    index_state.write_text("[]", encoding="utf-8")
+    with pytest.raises(SourceError) as index_shape_error:
+        load_index_progress_state(tmp_path)
+    assert index_shape_error.value.code == "SOURCE_INDEX_PROGRESS_INVALID"
+
+    scan_state = scan_state_path_for_home(tmp_path)
+    scan_state.write_text("{", encoding="utf-8")
+    with pytest.raises(SourceError) as scan_json_error:
+        load_scan_state(tmp_path)
+    assert scan_json_error.value.code == "SOURCE_SCAN_STATE_INVALID"
+
+    scan_state.write_text("[]", encoding="utf-8")
+    with pytest.raises(SourceError) as scan_shape_error:
+        load_scan_state(tmp_path)
+    assert scan_shape_error.value.code == "SOURCE_SCAN_STATE_INVALID"
+
+
+def test_scan_state_validation_covers_authorization_failures(tmp_path: Path) -> None:
+    profile = SourceProfile(baseline=[], library=[str(tmp_path / "library")], exclude=[])
+    state_path = scan_state_path_for_home(tmp_path)
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    valid_state = {
+        "dry_run": False,
+        "roles": ["library"],
+        "source_profile_hash": source_profile_hash(profile),
+        "risk_warnings": [],
+        "force_risky_sources": False,
+    }
+    cases = [
+        ({**valid_state, "dry_run": True}, "LIBRARY_BUILD_SCAN_REQUIRED"),
+        ({**valid_state, "roles": "library"}, "SOURCE_SCAN_STATE_INVALID"),
+        ({**valid_state, "roles": ["baseline"]}, "LIBRARY_BUILD_SCAN_REQUIRED"),
+        ({**valid_state, "source_profile_hash": "stale"}, "LIBRARY_BUILD_SCAN_STALE"),
+        ({**valid_state, "risk_warnings": ["blocked"]}, "LIBRARY_BUILD_RISK_NOT_CONFIRMED"),
+    ]
+    for state, expected_code in cases:
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+        with pytest.raises(SourceError) as exc_info:
+            validate_scan_state_for_index(tmp_path, profile)
+        assert exc_info.value.code == expected_code
+
+    forced_state = {**valid_state, "risk_warnings": ["blocked"], "force_risky_sources": True}
+    state_path.write_text(json.dumps(forced_state), encoding="utf-8")
+    assert validate_scan_state_for_index(tmp_path, profile) == forced_state
+
+
+def test_source_classification_and_details_cover_safe_boundaries(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    deck = tmp_path / "deck.pptx"
+    deck.write_bytes(b"deck")
+    profile = SourceProfile(
+        baseline=[],
+        library=[str(home), str(tmp_path / "candidate")],
+        exclude=[str(tmp_path / "ignored")],
+    )
+
+    assert classify_source_path(home, user_home=home).category == "blocked"
+    assert classify_source_path(home / "Library" / "Caches" / "deck.pptx", user_home=home).category == "blocked"
+    assert classify_source_path(deck, user_home=home).reason == "pptx file"
+    assert classify_source_path(tmp_path / "candidate", user_home=home).category == "candidate"
+    assert classify_source_path(tmp_path / "ignored", role="exclude", user_home=home).category == "trusted"
+    details = risky_source_details(profile, roles=["library", "exclude"], user_home=home)
+    assert [item.category for item in details] == ["blocked"]
+
+
+def test_add_source_deduplicates_normalized_paths(tmp_path: Path) -> None:
+    profile = SourceProfile.empty()
+
+    once = add_source(profile, "library", str(tmp_path / "library"))
+    twice = add_source(once, "library", str(tmp_path / "library"))
+
+    assert once.library == twice.library
+
+
+def test_source_scan_skips_symlinks_that_escape_the_source_root(tmp_path: Path) -> None:
+    source_root = tmp_path / "library"
+    outside = tmp_path / "outside"
+    source_root.mkdir()
+    outside.mkdir()
+    safe_deck = source_root / "safe.pptx"
+    escaped_deck = outside / "escaped.pptx"
+    safe_deck.write_bytes(b"safe")
+    escaped_deck.write_bytes(b"escaped")
+    escaped_dir_link = source_root / "external-library"
+    escaped_file_link = source_root / "external-deck.pptx"
+    escaped_dir_link.symlink_to(outside, target_is_directory=True)
+    escaped_file_link.symlink_to(escaped_deck)
+    profile = SourceProfile(baseline=[], library=[str(source_root)], exclude=[])
+
+    files = collect_pptx_files(profile, roles=["library"])
+    scan = scan_sources(profile, roles=["library"])
+
+    assert files == [safe_deck.resolve()]
+    assert scan["file_count"] == 1
+    assert scan["pptx_count"] == 1
+    assert str(escaped_dir_link) in scan["excluded_directories"]
+    assert str(escaped_file_link) in scan["excluded_directories"]
+
+
+def test_source_scan_skips_symlink_cycles(tmp_path: Path) -> None:
+    source_root = tmp_path / "library"
+    source_root.mkdir()
+    deck = source_root / "deck.pptx"
+    deck.write_bytes(b"deck")
+    loop = source_root / "loop"
+    loop.symlink_to(source_root, target_is_directory=True)
+    profile = SourceProfile(baseline=[], library=[str(source_root)], exclude=[])
+
+    files = collect_pptx_files(profile, roles=["library"])
+    scan = scan_sources(profile, roles=["library"])
+
+    assert files == [deck.resolve()]
+    assert str(loop) in scan["excluded_directories"]
+
+
+def test_source_scan_handles_direct_files_missing_roots_and_explicit_excludes(tmp_path: Path) -> None:
+    source_root = tmp_path / "library"
+    source_root.mkdir()
+    included = source_root / "included.pptx"
+    included.write_bytes(b"deck")
+    (source_root / "notes.txt").write_text("notes", encoding="utf-8")
+    (source_root / "~$lock.pptx").write_bytes(b"lock")
+    hidden_tmp = source_root / ".tmp-render"
+    hidden_tmp.mkdir()
+    (hidden_tmp / "hidden.pptx").write_bytes(b"hidden")
+    excluded = source_root / "excluded"
+    excluded.mkdir()
+    (excluded / "excluded.pptx").write_bytes(b"excluded")
+    direct = tmp_path / "direct.pptx"
+    direct.write_bytes(b"direct")
+    direct_lock = tmp_path / ".~direct.pptx"
+    direct_lock.write_bytes(b"lock")
+    missing = tmp_path / "missing"
+    source_link = tmp_path / "library-link"
+    source_link.symlink_to(source_root, target_is_directory=True)
+    profile = SourceProfile(
+        baseline=[],
+        library=[str(source_root), str(direct), str(direct_lock), str(missing), str(source_link)],
+        exclude=[str(excluded)],
+    )
+
+    files = collect_pptx_files(profile, roles=["library"])
+    scan = scan_sources(profile, roles=["library"])
+
+    assert files == sorted([included.resolve(), direct.resolve()])
+    assert scan["file_count"] == 3
+    assert str(excluded.resolve()) in scan["excluded_directories"]
+    assert str(hidden_tmp.resolve()) in scan["excluded_directories"]
+    assert str(missing.resolve()) in scan["excluded_directories"]
+    assert str(source_link) in scan["excluded_directories"]
 
 
 def test_cli_init_manifest_loads_profile(tmp_path: Path, capsys) -> None:

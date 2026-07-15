@@ -17,6 +17,7 @@ from ppt_lib.contracts.errors import (
     error,
     warning,
 )
+from ppt_lib.contracts.registry import ContractRegistry
 
 # ---------------------------------------------------------------------------
 # Registry
@@ -27,7 +28,7 @@ class TestContractRegistry:
     def test_list_contracts_returns_all_schemas(self):
         registry = get_registry()
         contracts = registry.list_contracts()
-        assert len(contracts) == 7
+        assert len(contracts) == 10
         names = {c.name for c in contracts}
         assert "capabilities.v1" in names
         assert "search-response.v2" in names
@@ -36,6 +37,7 @@ class TestContractRegistry:
         assert "feedback-event.v1" in names
         assert "job.v1" in names
         assert "deck-master-selection.v1" in names
+        assert "readiness.v1" in names
 
     def test_get_returns_definition(self):
         registry = get_registry()
@@ -55,6 +57,14 @@ class TestContractRegistry:
         registry = get_registry()
         assert registry.has("capabilities.v1") is True
         assert registry.has("search-response.v2") is True
+        assert registry.has("deck_master_ppt_library_selection.v1") is True
+
+    def test_canonical_deck_master_alias_resolves_to_vendored_schema(self):
+        registry = get_registry()
+        definition = registry.get("deck_master_ppt_library_selection.v1")
+
+        assert definition.schema_path.name == "deck-master-selection.v1.schema.json"
+        assert definition.schema["properties"]["schema_version"]["const"] == ("deck_master_ppt_library_selection.v1")
 
     def test_has_returns_false_for_unknown(self):
         registry = get_registry()
@@ -121,6 +131,45 @@ class TestContractValidation:
         assert any(e.code == CONTRACT_VALIDATION_FAILED for e in errors)
         assert any("WRONG_VALUE" in e.message for e in errors)
 
+    def test_search_request_v2_accepts_declared_filter_arrays(self):
+        registry = get_registry()
+        payload = {
+            "contract": "ppt_library.search_request.v2",
+            "request_id": "req-1",
+            "query": "automotive architecture",
+            "search_profile": "deck_master",
+            "filters": {
+                "industry": ["automotive"],
+                "scenario": ["proposal"],
+                "narrative_role": ["solution_architecture"],
+                "page_role": ["architecture"],
+                "review_state": ["approved"],
+                "include_versions": False,
+            },
+        }
+
+        assert registry.validate("search-request.v2", payload) == []
+
+    def test_search_request_v2_rejects_unknown_or_scalar_filters(self):
+        registry = get_registry()
+        base_payload = {
+            "contract": "ppt_library.search_request.v2",
+            "request_id": "req-1",
+            "query": "automotive architecture",
+        }
+
+        unknown_errors = registry.validate(
+            "search-request.v2",
+            base_payload | {"filters": {"confidentiality": ["public"]}},
+        )
+        scalar_errors = registry.validate(
+            "search-request.v2",
+            base_payload | {"filters": {"industry": "automotive"}},
+        )
+
+        assert any(error.details.get("instance_path") == "/filters" for error in unknown_errors)
+        assert any(error.details.get("instance_path") == "/filters/industry" for error in scalar_errors)
+
     def test_unknown_contract(self):
         registry = get_registry()
         errors = registry.validate("nonexistent.v99", {})
@@ -165,6 +214,74 @@ class TestContractValidation:
         }
         errors = registry.validate("search-response.v2", payload, strict=False)
         assert errors == []
+
+    def test_validates_nested_required_fields_and_number_bounds(self):
+        registry = get_registry()
+        payload = {
+            "_meta": {
+                "envelope": "ppt_library.envelope.v2",
+                "contract": "ppt_library.search_response.v2",
+                "producer_version": "2.0.1.dev0",
+                "command": "search",
+                "request_id": "req-1",
+                "generated_at": "2026-07-13T00:00:00Z",
+            },
+            "data": {
+                "candidates": [
+                    {
+                        "candidate_id": "cand-1",
+                        "canonical_asset_id": "asset-1",
+                        "slide_revision_id": "rev-1",
+                        "title": "Title",
+                        "score": 1.5,
+                    }
+                ]
+            },
+            "_warnings": [],
+            "_errors": [],
+        }
+
+        errors = registry.validate("search-response.v2", payload)
+
+        assert any(error.details.get("instance_path") == "/data/candidates/0/score" for error in errors)
+        assert any("provenance" in error.message for error in errors)
+
+    def test_validates_local_refs_and_any_of(self):
+        registry = get_registry()
+        payload = {
+            "schema_version": "deck_master_ppt_library_selection.v1",
+            "run_id": "run-1",
+            "selections": [{"candidates": []}],
+        }
+
+        errors = registry.validate("deck_master_ppt_library_selection.v1", payload)
+
+        assert any(error.details.get("instance_path") == "/selections/0" for error in errors)
+
+    def test_non_strict_only_relaxes_root_additional_properties(self, tmp_path):
+        schema = {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": {
+                "nested": {
+                    "type": "object",
+                    "properties": {"known": {"type": "string"}},
+                    "additionalProperties": False,
+                }
+            },
+            "additionalProperties": False,
+        }
+        (tmp_path / "nested.schema.json").write_text(__import__("json").dumps(schema), encoding="utf-8")
+        registry = ContractRegistry(tmp_path)
+
+        errors = registry.validate(
+            "nested",
+            {"nested": {"unknown": True}, "root_extra": True},
+            strict=False,
+        )
+
+        assert len(errors) == 1
+        assert errors[0].details.get("instance_path") == "/nested"
 
 
 # ---------------------------------------------------------------------------

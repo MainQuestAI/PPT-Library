@@ -8,6 +8,7 @@ from unittest.mock import patch as mock_patch
 import pytest
 
 from ppt_lib.annotator import (
+    AnnotationBatch,
     AnnotationResult,
     annotate_batch,
     build_annotation_prompt,
@@ -132,6 +133,11 @@ def test_write_annotations(db_with_slides):
     row2 = conn.execute("SELECT narrative_role, industry, scenario FROM slides WHERE id = 2").fetchone()
     assert row2 == ("case", "fmcg", "proposal")
 
+    fts_row = conn.execute(
+        "SELECT narrative_role, industry, scenario FROM slides_fts WHERE legacy_slide_id = '1'"
+    ).fetchone()
+    assert fts_row == ("opener", "retail", "pitch")
+
 
 def test_annotate_batch_dry_run(db_with_slides):
     conn, db_path = db_with_slides
@@ -213,12 +219,82 @@ def test_cli_annotate_dry_run(tmp_path, monkeypatch, capsys):
     conn.commit()
     conn.close()
 
-    monkeypatch.setenv("PPT_LIBRARY_HOME", str(tmp_path))
-
     mock_response = '{"narrative_role": "case", "industry": "retail", "scenario": "pitch"}'
     with mock_patch("ppt_lib.annotator._call_lmstudio", return_value=mock_response):
         from ppt_lib.cli import main
-        result = main(["annotate", "--dry-run", "--provider", "lmstudio", "--batch", "10"])
+        result = main([
+            "--home-dir", str(tmp_path), "annotate", "--dry-run", "--provider", "lmstudio", "--batch", "10",
+        ])
 
     # CLI should succeed
     assert result is None or result == 0
+
+
+def test_cli_annotate_partial_failure_returns_warning(monkeypatch, capsys, tmp_path):
+    from ppt_lib.cli import main
+
+    connection = type("Connection", (), {"close": lambda self: None})()
+    monkeypatch.setattr("ppt_lib.cli.connect", lambda path: connection)
+    monkeypatch.setattr("ppt_lib.cli.init_db", lambda conn: None)
+    monkeypatch.setattr(
+        "ppt_lib.annotator.annotate_batch",
+        lambda *args, **kwargs: AnnotationBatch(
+            results=[AnnotationResult(1, "case", "retail", "pitch")],
+            errors=[(2, "provider timeout")],
+        ),
+    )
+
+    exit_code = main(["--home-dir", str(tmp_path), "annotate", "--provider", "lmstudio"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert payload["result"]["annotated"] == 1
+    assert payload["_errors"][0]["code"] == "ANNOTATE_PARTIAL"
+    assert payload["_errors"][0]["severity"] == "warning"
+
+
+def test_cli_annotate_total_failure_exits_one(monkeypatch, capsys, tmp_path):
+    from ppt_lib.cli import main
+
+    connection = type("Connection", (), {"close": lambda self: None})()
+    monkeypatch.setattr("ppt_lib.cli.connect", lambda path: connection)
+    monkeypatch.setattr("ppt_lib.cli.init_db", lambda conn: None)
+    monkeypatch.setattr(
+        "ppt_lib.annotator.annotate_batch",
+        lambda *args, **kwargs: AnnotationBatch(
+            results=[],
+            errors=[(1, "provider unavailable"), (2, "provider unavailable")],
+        ),
+    )
+
+    exit_code = main(["--home-dir", str(tmp_path), "annotate", "--provider", "lmstudio"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 1
+    assert payload["result"]["annotated"] == 0
+    assert payload["_errors"][0]["code"] == "ANNOTATE_FAILED"
+    assert payload["_errors"][0]["severity"] == "error"
+
+
+def test_cli_annotate_closes_database_connection(monkeypatch, capsys, tmp_path):
+    from ppt_lib.cli import main
+
+    class Connection:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    connection = Connection()
+    monkeypatch.setattr("ppt_lib.cli.connect", lambda path: connection)
+    monkeypatch.setattr("ppt_lib.cli.init_db", lambda conn: None)
+    monkeypatch.setattr(
+        "ppt_lib.annotator.annotate_batch",
+        lambda *args, **kwargs: AnnotationBatch(results=[], errors=[]),
+    )
+
+    exit_code = main(["--home-dir", str(tmp_path), "annotate", "--dry-run"])
+    json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert connection.closed is True

@@ -3,12 +3,18 @@ from pathlib import Path
 import pytest
 
 from ppt_lib.config import (
+    PLAINTEXT_SECRET_WARNING_CODE,
+    SENSITIVE_KEYS,
+    ConfigCommandError,
     ConfigError,
+    ConfigSecurityWarning,
     ensure_dirs,
     load_settings,
+    set_config_value,
     settings_summary,
     write_default_config,
 )
+from ppt_lib.settings import Settings
 
 
 def test_default_settings_paths_use_home_dir_override(tmp_path: Path) -> None:
@@ -118,14 +124,69 @@ def test_ensure_dirs_creates_all_dirs(tmp_path: Path) -> None:
 
 def test_settings_summary_redacts_sensitive_values(tmp_path: Path) -> None:
     settings = load_settings(
-        {"home_dir": tmp_path, "openai_api_key": "sk-test-secret"},
+        {
+            "home_dir": tmp_path,
+            "openai_api_key": "sk-test-openai",
+            "embedding_api_key": "sk-test-embedding",
+            "paddleocr_mcp_access_token": "test-paddle-token",
+        },
         config_path=tmp_path / "config.yml",
     )
 
     summary = settings_summary(settings)
 
     assert summary["openai_api_key"] == "present"
-    assert "sk-test-secret" not in repr(summary)
+    assert summary["embedding_api_key"] == "present"
+    assert summary["paddleocr_mcp_access_token"] == "present"
+    assert "sk-test-openai" not in repr(summary)
+    assert "sk-test-embedding" not in repr(summary)
+    assert "test-paddle-token" not in repr(summary)
+
+
+def test_sensitive_registry_covers_all_secret_settings_fields() -> None:
+    secret_like_fields = {
+        name
+        for name in Settings.model_fields
+        if name.endswith(("_api_key", "_access_token"))
+    }
+
+    assert secret_like_fields <= SENSITIVE_KEYS
+
+
+def test_embedding_api_key_cannot_be_written_to_config(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yml"
+
+    with pytest.raises(ConfigCommandError) as exc_info:
+        set_config_value(
+            config_path,
+            "embedding_api_key",
+            "sk-should-never-be-written",
+            home_dir=tmp_path,
+        )
+
+    assert exc_info.value.code == "CONFIG_SENSITIVE_KEY_REJECTED"
+    assert not config_path.exists()
+
+
+def test_plaintext_secret_config_warns_without_leaking_value(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    canary = "sk-canary-must-never-appear-in-diagnostics"
+    config_path = tmp_path / "config.yml"
+    config_path.write_text(f"embedding_api_key: {canary}\n", encoding="utf-8")
+
+    with pytest.warns(ConfigSecurityWarning) as captured:
+        settings = load_settings({"home_dir": tmp_path}, config_path=config_path)
+
+    streams = capsys.readouterr()
+    diagnostic = "\n".join(str(item.message) for item in captured)
+    assert settings.embedding_api_key == canary
+    assert PLAINTEXT_SECRET_WARNING_CODE in diagnostic
+    assert "embedding_api_key" in diagnostic
+    assert canary not in diagnostic
+    assert canary not in streams.out
+    assert canary not in streams.err
 
 
 def test_invalid_threshold_rejected(tmp_path: Path) -> None:

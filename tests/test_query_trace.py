@@ -173,6 +173,10 @@ class TestTraceBuilder:
         assert builder.trace_id.startswith("qt_")
         assert builder.request_id.startswith("req_")
 
+    def test_caller_request_id_is_preserved(self):
+        builder = TraceBuilder("q", "p", "v", request_id="req_external")
+        assert builder.build().request_id == "req_external"
+
     def test_duration_ms(self):
         builder = TraceBuilder("q", "p", "v")
         time.sleep(0.01)

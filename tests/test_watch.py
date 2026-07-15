@@ -4,6 +4,7 @@ import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from ppt_lib.indexer import ErrorRecord, IndexResult
 from ppt_lib.watch import (
     PptxEventHandler,
     WatchQueue,
@@ -67,6 +68,29 @@ def test_process_events_once_continues_after_failure(tmp_path: Path) -> None:
     assert errors[0].code == "WATCH_INDEX_FAILED"
 
 
+def test_process_events_once_surfaces_failed_index_result_and_continues(tmp_path: Path) -> None:
+    bad = tmp_path / "bad.pptx"
+    good = tmp_path / "good.pptx"
+    queue = WatchQueue()
+    queue.add(bad)
+    queue.add(good)
+    processed: list[Path] = []
+
+    def callback(path: Path) -> IndexResult:
+        processed.append(path)
+        if path == bad:
+            return IndexResult(path, "failed", 0, [], [ErrorRecord("INDEX_FAILED", "bad deck", "indexer")])
+        return IndexResult(path, "indexed", 1, [], [])
+
+    errors = process_events_once(queue, callback)
+
+    assert processed == [bad, good]
+    assert len(errors) == 1
+    assert errors[0].code == "WATCH_INDEX_FAILED"
+    assert str(bad) in errors[0].message
+    assert "bad deck" in errors[0].message
+
+
 def test_wait_until_file_stable_success(tmp_path: Path) -> None:
     path = tmp_path / "deck.pptx"
     path.write_bytes(b"stable")
@@ -76,6 +100,22 @@ def test_wait_until_file_stable_success(tmp_path: Path) -> None:
 
 def test_wait_until_file_stable_missing_file(tmp_path: Path) -> None:
     assert wait_until_file_stable(tmp_path / "missing.pptx", interval_seconds=0, attempts=2) is False
+
+
+def test_wait_until_file_stable_handles_delete_between_probe_and_stat(tmp_path: Path, monkeypatch) -> None:
+    path = tmp_path / "vanishing.pptx"
+    path.write_bytes(b"temporary")
+    original_stat = Path.stat
+
+    def disappearing_stat(candidate: Path, *args, **kwargs):
+        if candidate == path:
+            path.unlink(missing_ok=True)
+            raise FileNotFoundError(path)
+        return original_stat(candidate, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", disappearing_stat)
+
+    assert wait_until_file_stable(path, interval_seconds=0, attempts=2) is False
 
 
 def test_event_handler_queues_pptx_created(tmp_path: Path) -> None:
@@ -207,3 +247,29 @@ def test_watch_service_unstable_file_records_warning(tmp_path: Path, monkeypatch
     errors = service.run()
 
     assert errors[0].code == "WATCH_FILE_UNSTABLE"
+
+
+def test_watch_service_surfaces_failed_index_result(tmp_path: Path, monkeypatch) -> None:
+    deck = tmp_path / "deck.pptx"
+    deck.write_bytes(b"deck")
+    queue = WatchQueue()
+    queue.add(deck, datetime(2026, 7, 13, tzinfo=UTC))
+    monkeypatch.setattr("ppt_lib.watch.wait_until_file_stable", lambda path: True)
+    service = WatchService(
+        tmp_path,
+        settings=type("Settings", (), {"watch_debounce_seconds": 0})(),
+        index_callback=lambda path: IndexResult(
+            path,
+            "failed",
+            0,
+            [],
+            [ErrorRecord("INDEX_FAILED", "invalid package", "indexer")],
+        ),
+        queue=queue,
+    )
+
+    errors = service.process_ready(force=True)
+
+    assert len(errors) == 1
+    assert errors[0].code == "WATCH_INDEX_FAILED"
+    assert "invalid package" in errors[0].message

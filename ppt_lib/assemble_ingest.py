@@ -65,8 +65,8 @@ def ingest_assemble_output(
     try:
         conn.execute("BEGIN")
         _mark_output_slides(conn, output_presentation_id)
-        lineage_count, warnings = _insert_lineage(conn, manifest, output_presentation_id, run_id)
-        status = "completed" if lineage_count == len(manifest.slides) and not warnings else "partial"
+        lineage_count, warnings = _insert_lineage(conn, report, output_presentation_id, run_id)
+        status = "completed" if lineage_count == report.slide_count and not warnings else "partial"
         _update_assemble_run(conn, run_id, output_presentation_id=output_presentation_id, status=status)
         conn.commit()
     except sqlite3.Error as exc:
@@ -133,7 +133,7 @@ def _mark_output_slides(conn: sqlite3.Connection, presentation_id: int) -> None:
 
 def _insert_lineage(
     conn: sqlite3.Connection,
-    manifest: AssembleManifest,
+    report: AssembleReport,
     output_presentation_id: int,
     run_id: int,
 ) -> tuple[int, list[str]]:
@@ -149,12 +149,17 @@ def _insert_lineage(
     derived_by_index = {int(row[1]): int(row[0]) for row in output_rows}
     warnings: list[str] = []
     lineage_count = 0
-    for output_index, source_spec in enumerate(manifest.slides):
+    for slide_report in report.slides:
+        output_index = slide_report.output_page_number - 1
         derived_slide_id = derived_by_index.get(output_index)
         if derived_slide_id is None:
             warnings.append(f"missing derived slide for output index {output_index}")
             continue
-        source_slide_id = source_spec.source_slide_id or _resolve_source_slide_id(conn, source_spec.source_file, source_spec.page_number)
+        source_slide_id = slide_report.source_slide_id or _resolve_source_slide_id(
+            conn,
+            slide_report.source_file,
+            slide_report.source_page_number,
+        )
         if source_slide_id is None or not _slide_exists(conn, source_slide_id):
             warnings.append(f"missing source slide for output index {output_index}")
             continue

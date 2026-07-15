@@ -26,8 +26,8 @@ from ppt_lib.vector_backend import (
 def _create_db_with_embeddings() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.execute(
-        """CREATE TABLE embeddings (
-            slide_id INTEGER PRIMARY KEY,
+        """CREATE TABLE slides (
+            id INTEGER PRIMARY KEY,
             presentation_id INTEGER,
             embedding BLOB
         )"""
@@ -51,8 +51,8 @@ class TestSqliteScanBackend:
 
     def test_build_index(self):
         conn = _create_db_with_embeddings()
-        conn.execute("INSERT INTO embeddings VALUES (1, 1, ?)", (_make_embedding(),))
-        conn.execute("INSERT INTO embeddings VALUES (2, 1, ?)", (_make_embedding(seed=1),))
+        conn.execute("INSERT INTO slides VALUES (1, 1, ?)", (_make_embedding(),))
+        conn.execute("INSERT INTO slides VALUES (2, 1, ?)", (_make_embedding(seed=1),))
         backend = SqliteScanBackend(conn)
         count = backend.build_index(conn)
         assert count == 2
@@ -60,7 +60,7 @@ class TestSqliteScanBackend:
     def test_search_returns_results(self):
         conn = _create_db_with_embeddings()
         for i in range(5):
-            conn.execute(f"INSERT INTO embeddings VALUES ({i+1}, 1, ?)", (_make_embedding(seed=i),))
+            conn.execute(f"INSERT INTO slides VALUES ({i+1}, 1, ?)", (_make_embedding(seed=i),))
         backend = SqliteScanBackend(conn)
         query = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
         results = backend.search(query, top_k=3)
@@ -70,7 +70,7 @@ class TestSqliteScanBackend:
     def test_search_respects_top_k(self):
         conn = _create_db_with_embeddings()
         for i in range(10):
-            conn.execute(f"INSERT INTO embeddings VALUES ({i+1}, 1, ?)", (_make_embedding(seed=i),))
+            conn.execute(f"INSERT INTO slides VALUES ({i+1}, 1, ?)", (_make_embedding(seed=i),))
         backend = SqliteScanBackend(conn)
         results = backend.search(np.array([1, 0, 0, 0], dtype=np.float32), top_k=2)
         assert len(results) <= 2
@@ -83,14 +83,14 @@ class TestSqliteScanBackend:
 
     def test_search_zero_query(self):
         conn = _create_db_with_embeddings()
-        conn.execute("INSERT INTO embeddings VALUES (1, 1, ?)", (_make_embedding(),))
+        conn.execute("INSERT INTO slides VALUES (1, 1, ?)", (_make_embedding(),))
         backend = SqliteScanBackend(conn)
         results = backend.search(np.zeros(4, dtype=np.float32))
         assert results == []
 
     def test_get_status(self):
         conn = _create_db_with_embeddings()
-        conn.execute("INSERT INTO embeddings VALUES (1, 1, ?)", (_make_embedding(dim=8),))
+        conn.execute("INSERT INTO slides VALUES (1, 1, ?)", (_make_embedding(dim=8),))
         backend = SqliteScanBackend(conn)
         status = backend.get_status()
         assert status.backend_name == "sqlite_scan"
@@ -226,7 +226,7 @@ class TestHybridSearch:
             doc = SearchDocument(f"sd_{i}", f"a{i}", f"srev_{i}", i,
                 title, body, "", "", "", "", "", "", "", "")
             index_search_document(conn, doc)
-            conn.execute(f"INSERT INTO embeddings VALUES ({i}, 1, ?)", (_make_embedding(seed=i),))
+            conn.execute(f"INSERT INTO slides VALUES ({i}, 1, ?)", (_make_embedding(seed=i),))
 
     def test_hybrid_lexical_only(self):
         conn = _create_db_with_embeddings()

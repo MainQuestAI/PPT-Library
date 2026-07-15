@@ -501,6 +501,9 @@ def _scan_source_paths(profile: SourceProfile, roles: list[SourceRole] | None = 
     def scan_dir(root: Path) -> None:
         nonlocal file_count
         for candidate in root.iterdir():
+            if candidate.is_symlink():
+                excluded_directories.add(str(candidate))
+                continue
             if candidate.is_dir():
                 if should_skip_dir(candidate):
                     continue
@@ -519,6 +522,9 @@ def _scan_source_paths(profile: SourceProfile, roles: list[SourceRole] | None = 
             source_path = Path(source)
             scanned_roots.append((role, str(source_path)))
 
+            if source_path.is_symlink():
+                excluded_directories.add(str(source_path))
+                continue
             if should_skip_dir(source_path):
                 continue
             if not source_path.exists():
